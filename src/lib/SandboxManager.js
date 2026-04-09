@@ -57,8 +57,8 @@ export class SandboxManager {
     // 3. Resolve the actual Adapter Runner Binary path
     const executorName = isolatedEnv.RUNNER_EXECUTOR || 'claude-local';
     
-    // We expect natively copied adapters situated directly in the parent 'adapters' folder
-    const adapterPath = path.resolve(ROOT_DIR, '../adapters', executorName);
+    // We expect natively copied adapters situated directly in the monorepo's 'adapters' folder
+    const adapterPath = path.resolve(ROOT_DIR, 'adapters', executorName);
     const cliEntryFile = path.join(adapterPath, 'src/cli/index.ts');
 
     // Default bun runtime execution matrix
