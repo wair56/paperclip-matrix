@@ -1,36 +1,69 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# 📎 Paperclip Matrix
 
-## Getting Started
+**Paperclip Matrix** is a full-stack Web control panel deployed locally on your workstation to orchestrate and monitor autonomous AI agents ("remote workers"). 
 
-First, run the development server:
+It completely replaces traditional command-line operations with a graphical user interface, enabling operators to handle agent registration, task distribution, process monitoring, environment isolation, and data backups—all through a single browser window. 
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+*Your Local AI Agent Army's "Human Resources Command Center".*
+
+## 🌟 Key Features
+
+- **Identity Onboarding (Auto-join)**: Agents can seamlessly register via UI and establish remote connections to receive API keys securely.
+- **Worker Orchestration**: Ignite and terminate worker CLI processes directly with a click. Every spawned agent correctly operates in a sandboxed `$HOME` environment isolated from your host's configs.
+- **System Telemetry**: Real-time radar for CPU idle-time gaps and Memory availability, preventing language models from eating all your workstation resources!
+- **Sandbox Fast-Backups**: One-click ZIP archiving for your agent's workspace directory (`.data/workspaces`), purposefully ignoring massive `node_modules` closures.
+- *(Upcoming) Antidetect Browser Bridge*: Integrated mapping for local browser fingerprinting profiles with WebSocket endpoint injection!
+
+## ⚙️ Architecture
+
+Built on the latest modern stack for seamless runtime orchestration:
+- **Framework**: Next.js 16 (App Router)
+- **Runtime**: Bun 
+- **Frontend**: React 19 Client Components with a stunning Vanilla CSS Lovable-Warm-Night aesthetic.
+- **Backend / Interop**: Node.js `child_process.spawn` for isolated environment injections.
+
+## 🚀 Getting Started
+
+Ensure you have [Bun](https://bun.sh/) installed.
+
+1. Clone this repository and CD into it.
+2. Install dependencies:
+   ```bash
+   bun install
+   ```
+3. Start the dashboard server:
+   ```bash
+   bun dev
+   ```
+4. Open [http://localhost:3000](http://localhost:3000) 🥳
+
+## 📁 Directory Structure
+
+```text
+paperclip-dashboard/
+├── .data/                    # Runtime agent data (gitignored)
+│   ├── identities/           # Configuration keys
+│   ├── workspaces/           # Isolated sandbox roots
+│   └── archives/             # Compressed snapshots
+├── src/
+│   ├── app/                  # Next.js App Router API & Views
+│   └── lib/                  # Core orchestration & telemetry models
+└── ...
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+## ☕ Support / 支持
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+If you find this tool useful, consider buying me a coffee! 
+如果觉得本项目好用，请我喝杯咖啡吧！让创造力与代码的温度持续燃烧！🔥
 
-## Learn More
+<a href="https://www.buymeacoffee.com/399is" target="_blank"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a coffee&emoji=&slug=399is&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me A Coffee" /></a>
 
-To learn more about Next.js, take a look at the following resources:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/wair56/dataferry/master/BMC.png" width="260" alt="Buy Me A Coffee QR Code" style="margin-right: 20px" />
+  <img src="https://raw.githubusercontent.com/wair56/dataferry/master/wechat.png" width="260" alt="WeChat Pay QR Code" />
+</p>
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### 📬 Contact & Feedback / 联系与建议
+Got an idea or found a bug? Feel free to reach out or open an issue on GitHub!
