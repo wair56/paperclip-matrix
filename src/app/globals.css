@@ -1,26 +1,302 @@
-@import "tailwindcss";
+/*
+ * DESIGN SYSTEM: Paperclip Matrix Control Plane
+ * Inspired by Lovable DESIGN.md warm-humanist principles,
+ * adapted into a dark-mode "warm noir" aesthetic.
+ *
+ * Core philosophy:
+ *   - Warm dark background (not cold #000) — organic, not sterile
+ *   - All grays derived from a single warm base at varying opacity
+ *   - Depth via borders + inset shadows, not floating box-shadows
+ *   - Editorial typography with tight letter-spacing at display sizes
+ *   - Generous whitespace at section boundaries
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* ── Warm Noir Palette ── */
+  --bg-base: #141218;
+  --bg-surface: #1c1a22;
+  --bg-elevated: #242230;
+
+  /* Warm cream tint for text (not cold white) */
+  --text-primary: #f0ede6;
+  --text-secondary: rgba(240, 237, 230, 0.60);
+  --text-muted: rgba(240, 237, 230, 0.40);
+
+  /* Accent: warm amber-gold (derived from Lovable's warmth, not cold cyan) */
+  --accent: #e8a849;
+  --accent-muted: rgba(232, 168, 73, 0.15);
+  --accent-glow: rgba(232, 168, 73, 0.30);
+
+  /* Secondary accent: soft lavender */
+  --accent-secondary: #a78bfa;
+  --accent-secondary-muted: rgba(167, 139, 250, 0.15);
+
+  /* Borders — opacity-driven from cream base, not hard hex */
+  --border-subtle: rgba(240, 237, 230, 0.06);
+  --border-default: rgba(240, 237, 230, 0.10);
+  --border-interactive: rgba(240, 237, 230, 0.20);
+
+  /* Status */
+  --status-ok: #34d399;
+  --status-err: #f87171;
+  --status-warn: #fbbf24;
+
+  /* Shadows — Lovable inset technique adapted for dark mode */
+  --shadow-inset-btn: rgba(255,255,255,0.08) 0px 1px 0px 0px inset, rgba(0,0,0,0.40) 0px 0px 0px 0.5px inset, rgba(0,0,0,0.20) 0px 2px 4px 0px;
+  --shadow-focus: rgba(232, 168, 73, 0.20) 0px 0px 0px 3px;
+  --shadow-card: 0px 1px 3px rgba(0,0,0,0.30);
+
+  /* Spacing — 8px base unit per Lovable */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+  --space-4xl: 96px;
+
+  /* Radius — Lovable scale */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ── Reset & Base ── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.50;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
+
+/* ── Typography ── */
+h1 {
+  font-size: 36px;
+  font-weight: 600;
+  line-height: 1.10;
+  letter-spacing: -0.9px;
+  color: var(--text-primary);
+}
+
+h2 {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.3px;
+  color: var(--text-primary);
+}
+
+h3 {
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.30;
+  color: var(--text-primary);
+}
+
+label {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: var(--space-xs);
+}
+
+/* ── Surfaces ── */
+.glass-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+}
+
+/* ── Buttons — Lovable inset shadow technique ── */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  background: var(--accent);
+  color: var(--bg-base);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.50;
+  padding: var(--space-sm) var(--space-md);
+  border: none;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-inset-btn);
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+  white-space: nowrap;
+}
+
+.btn-primary:hover {
+  opacity: 0.90;
+}
+
+.btn-primary:active {
+  opacity: 0.80;
+  transform: scale(0.98);
+}
+
+.btn-primary:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus), var(--shadow-inset-btn);
+}
+
+.btn-outline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.50;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border-interactive);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: opacity 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-outline:hover {
+  background: rgba(240, 237, 230, 0.04);
+  border-color: rgba(240, 237, 230, 0.30);
+}
+
+.btn-outline:active {
+  opacity: 0.80;
+}
+
+.btn-outline:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+}
+
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  background: transparent;
+  color: var(--status-err);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.50;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid rgba(248, 113, 113, 0.30);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: opacity 0.15s ease, background 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-danger:hover {
+  background: rgba(248, 113, 113, 0.08);
+}
+
+/* ── Inputs — Lovable warm input treatment ── */
+input, select {
+  display: block;
+  width: 100%;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+input::placeholder {
+  color: var(--text-muted);
+}
+
+input:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-focus);
+}
+
+/* ── Status Indicator Dot ── */
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  flex-shrink: 0;
+}
+
+.status-dot--ok {
+  background: var(--status-ok);
+  box-shadow: 0 0 6px var(--status-ok);
+}
+
+.status-dot--err {
+  background: var(--status-err);
+  box-shadow: 0 0 6px var(--status-err);
+}
+
+/* ── Progress Bars ── */
+.progress-track {
+  background: rgba(240, 237, 230, 0.06);
+  border-radius: var(--radius-pill);
+  height: 6px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  transition: width 0.6s ease;
+}
+
+/* ── Agent Card ── */
+.agent-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: border-color 0.2s ease;
+}
+
+.agent-card:hover {
+  border-color: var(--border-interactive);
+}
+
+/* ── Utility ── */
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.gap-sm { gap: var(--space-sm); }
+.gap-md { gap: var(--space-md); }
+.gap-lg { gap: var(--space-lg); }
+.gap-xl { gap: var(--space-xl); }
