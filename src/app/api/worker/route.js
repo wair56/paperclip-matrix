@@ -1,9 +1,15 @@
 import { NextResponse } from 'next/server';
-import { spawn } from 'child_process';
 import { SandboxManager } from '@/lib/SandboxManager';
+import { getNodeSettings } from '@/lib/nodeSettings';
+import { appendFileSync } from 'fs';
+import path from 'path';
+import { LOGS_DIR } from '@/lib/paths';
 
-// Temporary memory store for running processes (in production, use PM2 or Redis)
-const activeWorkers = new Map();
+// Use globalThis to persist across HMR in development
+if (!globalThis.__matrixActiveWorkers) {
+  globalThis.__matrixActiveWorkers = new Map();
+}
+const activeWorkers = globalThis.__matrixActiveWorkers;
 
 export async function POST(req) {
   try {
@@ -29,26 +35,52 @@ export async function POST(req) {
 
     console.log(`[Matrix-Orchestrator] IGNITING AGENT: ${role}`);
     console.log(`[Matrix-Orchestrator] ADAPTER: ${payload.executorName}`);
-    console.log(`[Matrix-Orchestrator] MAPPED CLI: ${payload.execCommand.join(' ')}`);
-    console.log(`[Matrix-Orchestrator] ANCHORED CWD: ${payload.cwd}`);
-    
-    // 3. Spawn the true Model Orchestration Adapter CLI natively via CWD routing
-    // e.g. `bun run /Users/.../adapters/claude-local/src/cli/index.ts`
-    const child = spawn(payload.execCommand[0], payload.execCommand.slice(1), {
-      cwd: payload.cwd,
-      env: payload.env,
-      detached: true,
-      stdio: 'ignore' // In production you should capture IPC or log pipes to `.data/logs`
-    });
+    console.log(`[Matrix-Orchestrator] MAPPED CLI: ${payload.resolvedBinary}`);
+    // Auto-Heal: Ensure the remote Agent natively maps to its core adapter module.
+    // e.g. "claude-local" -> "claude_local"
+    if (payload.env.PAPERCLIP_API_URL && payload.env.PAPERCLIP_AGENT_ID && payload.env.PAPERCLIP_API_KEY) {
+      let mappedAdapterType = (payload.executorName || "claude_local").replace(/-/g, '_');
+      const adapterConfig = {};
+      
+      const nodeSettings = getNodeSettings();
+      // Ensure the remote agent targets THIS MATRIX as a Webhook Node
+      if (nodeSettings.frp?.serverAddr && nodeSettings.frp?.remotePort) {
+         mappedAdapterType = "http";
+         adapterConfig.url = `http://${nodeSettings.frp.serverAddr}:${nodeSettings.frp.remotePort}/api/webhook/paperclip`;
+      }
 
-    child.unref(); // Allow the dashboard to continue without hanging on this process
+      if (payload.env.RUNNER_MODEL) {
+        adapterConfig.model = payload.env.RUNNER_MODEL;
+      }
+      
+      const patchPayload = { adapterType: mappedAdapterType };
+      if (Object.keys(adapterConfig).length > 0) {
+        patchPayload.adapterConfig = adapterConfig;
+      }
+      
+      fetch(`${payload.env.PAPERCLIP_API_URL}/api/agents/${payload.env.PAPERCLIP_AGENT_ID}`, {
+        method: "PATCH",
+        headers: { 
+          "Authorization": `Bearer ${payload.env.PAPERCLIP_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(patchPayload)
+      }).catch(err => console.error(`[Matrix-Orchestrator] Auto-heal sync failed for ${role}:`, err));
+    }
 
-    activeWorkers.set(role, child.pid);
+    // Open log file stream to capture output
+    const logPath = path.join(LOGS_DIR, `${role}.log`);
+    appendFileSync(logPath, `\n[Matrix] Node ${role} is IGNITED. Listening for HTTP Webhooks...\n`);
+
+    // In Webhook Native Mode, we don't spawn a detached CLI process.
+    // Instead we register a Virtual PID to tell the UI that this node is "Running" and ready.
+    const virtualPid = Date.now();
+    activeWorkers.set(role, virtualPid);
 
     return NextResponse.json({ 
       success: true, 
-      message: `Worker [${role}] fully Sandboxed and Ignited!`, 
-      pid: child.pid 
+      message: `Worker [${role}] fully Sandboxed and Ignited! Waiting for Webhooks.`, 
+      pid: virtualPid 
     });
 
   } catch (error) {
@@ -63,8 +95,8 @@ export async function DELETE(req) {
       return NextResponse.json({ success: false, error: `Worker ${role} is not seemingly active in this session.` }, { status: 404 });
     }
     
-    const pid = activeWorkers.get(role);
-    process.kill(pid); // Kill it.
+    // Virtual PID (Date.now()) is not a real process — just remove from tracking map.
+    // Do NOT call process.kill() on it.
     activeWorkers.delete(role);
 
     return NextResponse.json({ success: true, message: `Terminated Worker [${role}]` });

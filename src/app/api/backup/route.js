@@ -2,16 +2,10 @@ import { NextResponse } from 'next/server';
 import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync } from 'fs';
 import path from 'path';
+import { DATA_DIR, WORKSPACES_DIR } from '@/lib/paths';
 
-// Paths consistent with the consolidated .data directory
-const ROOT_DIR = process.cwd();
-const DATA_DIR = path.join(ROOT_DIR, '.data');
-const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 const ARCHIVES_DIR = path.join(DATA_DIR, 'archives');
-
-if (!existsSync(ARCHIVES_DIR)) {
-    mkdirSync(ARCHIVES_DIR, { recursive: true });
-}
+if (!existsSync(ARCHIVES_DIR)) mkdirSync(ARCHIVES_DIR, { recursive: true });
 
 export async function POST(req) {
     try {

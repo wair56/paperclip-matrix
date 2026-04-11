@@ -1,23 +1,45 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import AgentCard from '@/components/AgentCard';
+import LogViewer from '@/components/LogViewer';
+import TelemetryGauge from '@/components/TelemetryGauge';
 
 export default function Dashboard() {
   const [identities, setIdentities] = useState([]);
   const [retiredIdentities, setRetiredIdentities] = useState([]);
-  const [matrixStatus, setMatrixStatus] = useState('OFFLINE');
+  const [runningWorkers, setRunningWorkers] = useState(new Set());
+  const [liveRuns, setLiveRuns] = useState({});
+  const [viewingLogsFor, setViewingLogsFor] = useState(null);
+  const [showAddCompany, setShowAddCompany] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [sysinfo, setSysinfo] = useState(null);
 
   const [companies, setCompanies] = useState([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState('');
   const [newCompany, setNewCompany] = useState({ id: '', name: '', apiUrl: 'https://api.cowork.is', boardKey: '' });
+  const [editingCompany, setEditingCompany] = useState(null);
 
-  const [role, setRole] = useState('agent_01');
+  const [nodeSettings, setNodeSettings] = useState({ frp: {}, proxy: {} });
+  const [frpStatus, setFrpStatus] = useState({ isRunning: false, pid: null });
+  const [isDeployingFrp, setIsDeployingFrp] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
+  const [role, setRole] = useState('manager');
   const [executor, setExecutor] = useState('claude-local');
+  const [newModel, setNewModel] = useState('');
+  const [showProvisionForm, setShowProvisionForm] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [suggestedRoles, setSuggestedRoles] = useState([]); // Now an array of { role, soul } Let's rename to suggestedRolesData later if needed, leaving as is.
+  const [pendingSoul, setPendingSoul] = useState('');
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [availableTemplates, setAvailableTemplates] = useState([]);
+  const [remoteAgents, setRemoteAgents] = useState([]);
   const [adapters, setAdapters] = useState(['claude-local', 'codex-local', 'gemini-local']);
   
-  const [suggestedRoles, setSuggestedRoles] = useState([]);
-  const [discovering, setDiscovering] = useState(false);
+  // Modal states
+  const [showTemplateModal, setShowTemplateModal] = useState(false);
+  const [templateSelections, setTemplateSelections] = useState({});
 
   const fetchIdentities = useCallback(async () => {
     try {
@@ -38,6 +60,21 @@ export default function Dashboard() {
     } catch (err) { console.error('Sysinfo fetch failed:', err); }
   }, []);
 
+  const fetchLiveRuns = useCallback(async () => {
+    if (!selectedCompanyId) return;
+    try {
+      const res = await fetch(`/api/companies/${selectedCompanyId}/live-runs`);
+      const payload = await res.json();
+      if (payload.success && Array.isArray(payload.data)) {
+        const runMap = {};
+        payload.data.forEach(run => {
+          if (run.agentId) runMap[run.agentId] = run;
+        });
+        setLiveRuns(runMap);
+      }
+    } catch (err) { console.error('Live runs fetch failed:', err); }
+  }, [selectedCompanyId]);
+
   const fetchCompanies = useCallback(async () => {
     try {
       const res = await fetch('/api/companies');
@@ -48,13 +85,28 @@ export default function Dashboard() {
           setSelectedCompanyId(data.companies[0].id);
         }
       }
-    } catch (err) { console.error('Companies fetch failed:', err); }
+    } catch (err) { console.error('Failed to fetch companies', err); }
   }, [selectedCompanyId]);
+
+  const fetchNodeSettings = useCallback(async () => {
+    try {
+      const res = await fetch('/api/node-settings');
+      setNodeSettings(await res.json());
+    } catch (e) { console.error('failed settings', e); }
+  }, []);
+
+  const fetchFrpStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/frp');
+      setFrpStatus(await res.json());
+    } catch (e) { console.error('failed frp status', e); }
+  }, []);
 
   useEffect(() => {
     fetchIdentities();
-    fetchSysinfo();
     fetchCompanies();
+    fetchNodeSettings();
+    fetchFrpStatus();
     
     const fetchAdapters = async () => {
       try {
@@ -70,15 +122,83 @@ export default function Dashboard() {
     };
     fetchAdapters();
 
-    const interval = setInterval(fetchSysinfo, 3000);
+    const interval = setInterval(() => {
+      fetchSysinfo();
+      fetchLiveRuns();
+      fetchFrpStatus();
+    }, 3000);
     return () => clearInterval(interval);
-  }, [fetchIdentities, fetchSysinfo, fetchCompanies]);
+  }, [fetchIdentities, fetchCompanies, fetchNodeSettings, fetchFrpStatus, fetchSysinfo, fetchLiveRuns, executor]);
+
+  // Load available templates into the dropdown list exactly once implicitly via handleDiscover
+  useEffect(() => {
+    if (selectedCompanyId && availableTemplates.length === 0) {
+      handleDiscover();
+    }
+  }, [selectedCompanyId]);
+
 
   const [toast, setToast] = useState(null);
   const showToast = useCallback((message, isError = false) => {
     setToast({ message, isError });
     setTimeout(() => setToast(null), 3000);
   }, []);
+
+  const handleEditSave = async (e) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch('/api/companies', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editingCompany)
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('Successfully updated organization!', false);
+        setEditingCompany(null);
+        fetchCompanies();
+      } else {
+        showToast('Failed to update: ' + data.error, true);
+      }
+    } catch (err) { showToast('Error: ' + err.message, true); }
+  };
+
+  const handleDeleteCompany = async (e, companyId) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch('/api/companies', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: companyId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('Successfully unlinked organization', false);
+        if (selectedCompanyId === companyId) setSelectedCompanyId('');
+        fetchCompanies();
+      } else {
+        showToast('Failed to unlink: ' + data.error, true);
+      }
+    } catch (err) { showToast('Error: ' + err.message, true); }
+  };
+
+  const [isSyncing, setIsSyncing] = useState(false);
+  const handleSyncCloud = async () => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch('/api/identity/sync', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        showToast(data.message, false);
+        fetchIdentities();
+      } else {
+        showToast('Sync failed: ' + data.error, true);
+      }
+    } catch(e) {
+      showToast('Network error during sync', true);
+    }
+    setIsSyncing(false);
+  };
 
   const handleAddCompany = async (e) => {
     e.preventDefault();
@@ -91,8 +211,10 @@ export default function Dashboard() {
       const data = await res.json();
       if (data.success) {
         showToast('Successfully connected organization!', false);
+        const linkedCompanyId = data.company?.id || newCompany.id;
         setNewCompany({ id: '', name: '', apiUrl: 'https://api.cowork.is', boardKey: '' });
-        fetchCompanies();
+        await fetchCompanies();
+
       } else {
         showToast('Failed to add company: ' + data.error, true);
       }
@@ -107,11 +229,12 @@ export default function Dashboard() {
       const res = await fetch('/api/identity', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ companyId: selectedCompanyId, roleName: role, executor })
+        body: JSON.stringify({ companyId: selectedCompanyId, roleName: role, executor, model: newModel, initialSoul: pendingSoul })
       });
       const data = await res.json();
       if (data.success) {
         showToast('Auto-Join Successful! Agent: ' + data.agentId, false);
+        handleStartWorker(role);
         fetchIdentities();
       } else {
         showToast('Failed: ' + data.error, true);
@@ -120,9 +243,36 @@ export default function Dashboard() {
     setLoading(false);
   };
 
+  const handleTakeover = async (remoteAgent) => {
+    setLoading(true);
+    try {
+      const targetRole = remoteAgent.role || remoteAgent.name.toLowerCase().replace(/\s+/g, '_');
+      const res = await fetch('/api/identity/takeover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          companyId: selectedCompanyId, 
+          agentId: remoteAgent.id,
+          roleName: targetRole,
+          executor: adapters[0], // fallback executor
+          model: newModel 
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`Locally Adopted Agent: ${targetRole}`, false);
+        fetchIdentities();
+      } else {
+        showToast('Takeover Failed: ' + data.error, true);
+      }
+    } catch (err) { showToast('Error: ' + err.message, true); }
+    setLoading(false);
+  };
+
   const [discoverError, setDiscoverError] = useState('');
 
-  const handleDiscover = async () => {
+  const handleDiscover = async (tid) => {
+    const activeTid = tid !== undefined ? tid : selectedTemplateId;
     if (!selectedCompanyId) {
       setDiscoverError("Please select a Company first.");
       return;
@@ -133,17 +283,61 @@ export default function Dashboard() {
       const res = await fetch('/api/discover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ companyId: selectedCompanyId })
+        body: JSON.stringify({ companyId: selectedCompanyId, templateId: activeTid })
       });
       const data = await res.json();
       if (data.success) {
-        setSuggestedRoles(data.neededRoles);
-        if (data.neededRoles.length > 0) setRole(data.neededRoles[0]);
+        setSuggestedRoles(data.neededRoles || []);
+        setAvailableTemplates(data.availableTemplates || []);
+        if (data.agents) setRemoteAgents(data.agents);
+        
+        // Modal Flow: pre-select all unhired roles
+        if (tid !== undefined && data.neededRoles) {
+          const sels = {};
+          data.neededRoles.forEach(r => {
+            if (!r.hired) sels[r.role] = true;
+          });
+          setTemplateSelections(sels);
+        } else if (!showTemplateModal && data.neededRoles && data.neededRoles.length > 0) {
+           // Single provision logic
+           const unhired = data.neededRoles.filter(r => !r.hired);
+           if (unhired.length > 0) {
+             setRole(unhired[0].role);
+             setPendingSoul(unhired[0].soul || '');
+           }
+        }
       } else {
         setDiscoverError(data.error);
       }
     } catch (err) { setDiscoverError(err.message); }
     setDiscovering(false);
+  };
+
+  const handleBulkDeploy = async () => {
+    if (!selectedCompanyId) return showToast("Select a company first.", true);
+    setLoading(true);
+    const toDeploy = suggestedRoles.filter(r => !r.hired && templateSelections[r.role]);
+    let successCount = 0;
+    
+    for (const r of toDeploy) {
+      try {
+        const res = await fetch('/api/identity', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companyId: selectedCompanyId, roleName: r.role, executor, model: newModel, initialSoul: r.soul })
+        });
+        const data = await res.json();
+        if (data.success) {
+           successCount++;
+           handleStartWorker(r.role);
+        }
+      } catch (err) { console.error('Bulk deploy err', err); }
+    }
+    
+    showToast(`Deployed ${successCount}/${toDeploy.length} network agents!`, false);
+    setShowTemplateModal(false);
+    fetchIdentities();
+    setLoading(false);
   };
 
   const handleStartWorker = async (roleName) => {
@@ -154,12 +348,22 @@ export default function Dashboard() {
         body: JSON.stringify({ role: roleName })
       });
       const data = await res.json();
-      showToast(data.success ? data.message : 'Failed: ' + data.error, !data.success);
+      if (data.success || res.status === 409) {
+        // If 409, it means backend knows it's already running. Sync frontend state.
+        setRunningWorkers(prev => new Set([...prev, roleName]));
+        showToast(data.success ? data.message : `${roleName} is already active.`, false);
+      } else {
+        showToast('Failed: ' + data.error, true);
+      }
     } catch (err) { showToast('Exception: ' + err.message, true); }
   };
 
   const handleRetire = async (roleName) => {
     try {
+      // 1. Ensure the underlying agent process is killed first
+      await handleTerminate(roleName);
+
+      // 2. Soft-delete the identity file
       const res = await fetch('/api/identity', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
@@ -167,7 +371,10 @@ export default function Dashboard() {
       });
       const data = await res.json();
       showToast(data.success ? data.message : 'Failed: ' + data.error, !data.success);
-      if (data.success) fetchIdentities();
+      if (data.success) {
+        setRunningWorkers(prev => { const n = new Set(prev); n.delete(roleName); return n; });
+        fetchIdentities();
+      }
     } catch (err) { showToast('Exception: ' + err.message, true); }
   };
 
@@ -184,6 +391,19 @@ export default function Dashboard() {
     } catch (err) { showToast('Exception: ' + err.message, true); }
   };
 
+  const handleObliterate = async (roleName) => {
+    try {
+      const res = await fetch('/api/identity/archive', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: roleName })
+      });
+      const data = await res.json();
+      showToast(data.success ? `Obliterated ${roleName}` : 'Failed: ' + data.error, !data.success);
+      if (data.success) fetchIdentities();
+    } catch (err) { showToast('Exception: ' + err.message, true); }
+  };
+
   const handleTerminate = async (roleName) => {
     try {
       const res = await fetch('/api/worker', {
@@ -192,7 +412,9 @@ export default function Dashboard() {
         body: JSON.stringify({ role: roleName })
       });
       const data = await res.json();
-      showToast(data.success ? data.message : 'Failed: ' + data.error, !data.success);
+      // Always clear running state, whether or not it was active
+      setRunningWorkers(prev => { const n = new Set(prev); n.delete(roleName); return n; });
+      showToast(data.success ? data.message : `${roleName} stopped`, false);
     } catch (err) { showToast('Exception: ' + err.message, true); }
   };
 
@@ -208,18 +430,12 @@ export default function Dashboard() {
     } catch (err) { showToast('Exception: ' + err.message, true); }
   };
 
-  const isOnline = matrixStatus === 'ONLINE';
+
 
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto', padding: 'var(--space-2xl) var(--space-xl)' }}>
       {toast && (
-        <div style={{
-          position: 'fixed', top: 30, right: 30, zIndex: 9999,
-          background: toast.isError ? 'var(--status-err)' : 'var(--status-ok)',
-          color: '#fff', padding: '12px 20px', borderRadius: 8,
-          boxShadow: '0 8px 24px rgba(0,0,0,0.3)', fontSize: 13, fontWeight: 500,
-          backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.1)'
-        }}>
+        <div className={`toast ${toast.isError ? 'toast--err' : 'toast--ok'}`}>
           {toast.message}
         </div>
       )}
@@ -227,22 +443,40 @@ export default function Dashboard() {
       {/* ── Header ── */}
       <header className="flex items-center justify-between" style={{ marginBottom: 'var(--space-2xl)' }}>
         <div>
-          <h1>Matrix Control Plane</h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginTop: 'var(--space-xs)' }}>
-            Autonomous Agent Orchestration Dashboard
+          <h1 style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
+            Paperclip Workloads
+            <span style={{ fontSize: 11, background: 'var(--accent)', color: 'var(--bg-base)', padding: '3px 8px', borderRadius: 'var(--radius-sm)', fontWeight: 600, letterSpacing: '0.5px', verticalAlign: 'middle', textTransform: 'uppercase' }}>Local Matrix</span>
+          </h1>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginTop: 'var(--space-sm)' }}>
+            Autonomous Agent Orchestration Node
           </p>
         </div>
         <div className="flex items-center gap-md">
-          <span className={`status-dot ${isOnline ? 'status-dot--ok' : 'status-dot--err'}`}></span>
-          <span style={{ fontSize: 13, fontWeight: 500, color: isOnline ? 'var(--status-ok)' : 'var(--text-muted)' }}>
-            {matrixStatus}
-          </span>
-          <button
-            className="btn-primary"
-            onClick={() => setMatrixStatus(isOnline ? 'OFFLINE' : 'ONLINE')}
+          <button 
+            onClick={() => setShowSettings(!showSettings)} 
+            className={`btn-outline flex items-center ${showSettings ? 'active' : ''}`} 
+            style={{ gap: 'var(--space-sm)', background: showSettings ? 'var(--bg-elevated)' : 'transparent', position: 'relative' }}
           >
-            {isOnline ? 'Kill Matrix' : 'Ignite Matrix'}
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+            Gateway Settings
+            {frpStatus.isRunning && <span style={{ width: '8px', height: '8px', borderRadius: 'var(--radius-pill)', background: 'var(--status-ok)', position: 'absolute', top: '-2px', right: '-2px', border: '2px solid var(--bg-surface)' }}></span>}
           </button>
+          
+          <a
+            href="https://github.com/wair56/paperclip-matrix"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-outline flex items-center"
+            style={{ gap: 'var(--space-sm)', textDecoration: 'none' }}
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+            </svg>
+            Star on GitHub
+          </a>
         </div>
       </header>
 
@@ -258,47 +492,171 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* ── Node Network Gateway ── */}
+      {showSettings && (
+        <section className="glass-panel" style={{ padding: 'var(--space-xl)', marginBottom: 'var(--space-xl)', borderLeft: frpStatus.isRunning ? '3px solid var(--status-ok)' : '3px solid var(--border-default)' }}>
+          <h2 style={{ fontSize: 16, marginBottom: 'var(--space-md)', display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
+            🌐 Matrix Global Gateway
+            {frpStatus.isRunning ? (
+               <span style={{ fontSize: 11, background: 'var(--status-ok)', color: 'var(--bg-base)', padding: '2px 8px', borderRadius: 'var(--radius-lg)' }}>🟢 TUNNEL ACTIVE (PID: {frpStatus.pid})</span>
+            ) : (
+               <span style={{ fontSize: 11, background: 'var(--border-subtle)', color: 'var(--text-muted)', padding: '2px 8px', borderRadius: 'var(--radius-lg)' }}>⚫ OFFLINE</span>
+            )}
+          </h2>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-xl)' }}>
+            <div>
+              <h3 style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 'var(--space-sm)' }}>FRP Ingress Tunnel (TCP)</h3>
+              <div style={{ display: 'flex', gap: 'var(--space-sm)', marginBottom: 'var(--space-xs)' }}>
+                <input value={nodeSettings.frp?.serverAddr || ''} onChange={e => setNodeSettings({ ...nodeSettings, frp: { ...nodeSettings.frp, serverAddr: e.target.value } })} placeholder="Server IP (203.2.164.185)" style={{ flex: 2 }} />
+                <input value={nodeSettings.frp?.serverPort || ''} onChange={e => setNodeSettings({ ...nodeSettings, frp: { ...nodeSettings.frp, serverPort: parseInt(e.target.value) || '' } })} placeholder="Port" style={{ flex: 1 }} type="number" />
+              </div>
+              <div style={{ display: 'flex', gap: 'var(--space-sm)', marginBottom: 'var(--space-md)' }}>
+                 <input value={nodeSettings.frp?.token || ''} onChange={e => setNodeSettings({ ...nodeSettings, frp: { ...nodeSettings.frp, token: e.target.value } })} placeholder="Auth Token" style={{ flex: 2 }} type="password" />
+                 <input value={nodeSettings.frp?.remotePort || ''} onChange={e => setNodeSettings({ ...nodeSettings, frp: { ...nodeSettings.frp, remotePort: parseInt(e.target.value) || '' } })} placeholder="Remote Port (50002)" style={{ flex: 1 }} type="number" />
+              </div>
+              {frpStatus.isRunning ? (
+                <button 
+                  onClick={async () => {
+                    await fetch('/api/frp', { method: 'POST', body: JSON.stringify({ action: 'stop' }) });
+                    fetchFrpStatus();
+                  }} 
+                  className="btn-danger"
+                >
+                  Disconnect Tunnel
+                </button>
+              ) : (
+                <button 
+                  onClick={async () => {
+                    setIsDeployingFrp(true);
+                    try {
+                      await fetch('/api/node-settings', { method: 'POST', body: JSON.stringify(nodeSettings) });
+                      const res = await fetch('/api/frp', { method: 'POST', body: JSON.stringify({ action: 'start' }) });
+                      const payload = await res.json();
+                      if (!payload.success) {
+                        showToast(`Tunnel failed: ${payload.error || 'Unknown network error'}`, true);
+                      } else {
+                        showToast('Matrix Tunnel Connected!', false);
+                      }
+                    } catch (err) {
+                      showToast('Tunnel Crash: ' + err.message, true);
+                    }
+                    fetchFrpStatus();
+                    setIsDeployingFrp(false);
+                  }} 
+                  className="btn-primary"
+                  disabled={isDeployingFrp}
+                >
+                  {isDeployingFrp ? 'Deploying & Connecting...' : 'Connect Tunnel'}
+                </button>
+              )}
+            </div>
+            <div>
+              <h3 style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 'var(--space-sm)' }}>Local LLM Pipeline Proxy</h3>
+              <input 
+                value={nodeSettings.proxy?.httpsProxy || ''} 
+                onChange={e => setNodeSettings({ ...nodeSettings, proxy: { ...nodeSettings.proxy, httpsProxy: e.target.value } })} 
+                placeholder="HTTPS_PROXY (e.g. http://127.0.0.1:10809)" 
+                style={{ marginBottom: 'var(--space-xs)', width: '100%' }} 
+              />
+              <input 
+                value={nodeSettings.proxy?.openaiBaseUrl || ''} 
+                onChange={e => setNodeSettings({ ...nodeSettings, proxy: { ...nodeSettings.proxy, openaiBaseUrl: e.target.value } })} 
+                placeholder="OPENAI_BASE_URL (Optional)" 
+                style={{ marginBottom: 'var(--space-md)', width: '100%' }} 
+              />
+              <button 
+                 onClick={async () => {
+                   await fetch('/api/node-settings', { method: 'POST', body: JSON.stringify(nodeSettings) });
+                   showToast('Proxy settings saved globally.');
+                 }} 
+                 className="btn-outline"
+              >
+                 Save Proxy
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* ── Main Grid ── */}
       <div style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 'var(--space-xl)' }}>
 
         {/* ── LEFT: Master Organizations Panel ── */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)', overflow: 'hidden', minWidth: 0 }}>
           <section className="glass-panel" style={{ padding: 'var(--space-xl)' }}>
-            <h2 style={{ color: 'var(--text-primary)', marginBottom: 'var(--space-lg)', fontSize: 16 }}>Organizations</h2>
-            <div className="flex flex-col gap-sm" style={{ marginBottom: 'var(--space-lg)' }}>
+            <div className="flex items-center justify-between" style={{ minHeight: '36px', marginBottom: companies.length > 0 ? 'var(--space-md)' : 'var(--space-lg)' }}>
+              <h2 style={{ color: 'var(--text-primary)', margin: 0, fontSize: 18, fontWeight: 600 }}>Organizations</h2>
+              {companies.length > 0 && (
+                <button
+                  className={showAddCompany ? 'btn-danger' : 'btn-outline'}
+                  onClick={() => setShowAddCompany(v => !v)}
+                  style={{ padding: '2px 10px', fontSize: 12 }}
+                  title={showAddCompany ? 'Cancel' : 'Link New Company'}
+                >
+                  {showAddCompany ? '✕' : '+'}
+                </button>
+              )}
+            </div>
+            <div className="flex flex-col gap-sm" style={{ marginBottom: (showAddCompany || companies.length === 0) ? 'var(--space-lg)' : 0 }}>
               {companies.length === 0 ? (
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No organizations linked yet.</div>
+                <div style={{ fontSize: 14, color: 'var(--text-muted)' }}>No organizations linked yet.</div>
               ) : companies.map(c => {
                 const isSelected = selectedCompanyId === c.id;
+                const isEditing = editingCompany && editingCompany.id === c.id;
                 const onDutyCount = identities.filter(id => id.companyId === c.id).length;
                 return (
-                  <div key={c.id} onClick={() => setSelectedCompanyId(c.id)} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 14px', background: isSelected ? 'rgba(255,255,255,0.08)' : 'var(--bg-base)', borderRadius: 8, border: `1px solid ${isSelected ? 'var(--accent)' : 'var(--border-subtle)'}`, cursor: 'pointer', transition: 'all 0.2s', boxShadow: isSelected ? '0 4px 12px rgba(0,0,0,0.1)' : 'none' }}>
-                    <div>
-                      <div className="flex items-center gap-xs">
-                        <span className="status-dot status-dot--ok"></span>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: isSelected ? 'var(--accent)' : 'var(--text-primary)' }}>{c.name}</div>
-                      </div>
-                      <div style={{ fontSize: 11, color: isSelected ? 'rgba(255,255,255,0.7)' : 'var(--text-muted)', marginTop: 4, display: 'flex', gap: 8 }}>
-                         <span>ID: {c.id}</span>
-                         <span style={{ color: 'var(--status-ok)' }}>• {onDutyCount} On-Duty</span>
-                      </div>
-                      {isSelected && suggestedRoles.length > 0 && (
-                        <div style={{ fontSize: 10, color: 'var(--accent)', marginTop: 6 }}>
-                          Needs: {suggestedRoles.slice(0, 2).join(', ')}{suggestedRoles.length > 2 ? '...' : ''}
-                        </div>
+                  <div key={c.id} onClick={() => !isEditing && setSelectedCompanyId(c.id)} style={{ display: 'flex', flexDirection: 'column', padding: 'var(--space-lg)', background: 'var(--bg-elevated)', borderRadius: 'var(--radius-lg)', border: `1px solid ${isSelected ? 'var(--border-interactive)' : 'var(--border-subtle)'}`, cursor: isEditing ? 'default' : 'pointer', transition: 'border-color 0.2s ease', position: 'relative' }}>
+                    {/* Row 1: Company Name (prominent) */}
+                    <div className="flex items-center gap-sm" style={{ marginBottom: 'var(--space-sm)' }}>
+                      <span className={`status-dot ${onDutyCount > 0 ? 'status-dot--ok' : ''}`} style={{ background: onDutyCount === 0 ? 'var(--border-default)' : '' }}></span>
+                      <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name || c.id}</h3>
+                      {c.status === 'archived' && (
+                        <span style={{ fontSize: '10px', fontWeight: 600, padding: '2px 6px', borderRadius: 'var(--radius-sm)', background: 'var(--bg-base)', border: '1px solid var(--status-err)', color: 'var(--status-err)', whiteSpace: 'nowrap' }}>ARCHIVED</span>
                       )}
                     </div>
+                    {/* Row 2: Status badges */}
+                    <div className="flex items-center gap-sm" style={{ flexWrap: 'wrap' }}>
+                        {onDutyCount > 0 && (
+                          <span style={{ fontSize: '10px', fontWeight: 600, padding: '2px 6px', borderRadius: 'var(--radius-sm)', background: 'var(--accent-secondary-muted)', color: 'var(--accent-secondary)', whiteSpace: 'nowrap' }}>
+                            {onDutyCount} Node{onDutyCount !== 1 ? 's' : ''} Online
+                          </span>
+                        )}
+                        <span style={{ fontSize: '11px', fontFamily: 'monospace', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{c.id}</span>
+                    </div>
+                    {/* Row 3: Actions */}
+                    <div className="flex items-center gap-sm" style={{ marginTop: 'var(--space-xs)', opacity: isEditing ? 0 : 1, transition: 'opacity 0.2s', pointerEvents: isEditing ? 'none' : 'auto' }}>
+                         <button onClick={(e) => { e.stopPropagation(); setEditingCompany({ id: c.id, name: c.name, apiUrl: c.apiUrl, boardKey: '' }); }} className="btn-outline" style={{ padding: '2px 8px', fontSize: '11px' }} title="Edit Configuration">Edit</button>
+                         <button onClick={(e) => handleDeleteCompany(e, c.id)} className="btn-danger" style={{ padding: '2px 8px', fontSize: '11px' }} title="Unlink Organization">Unlink</button>
+                    </div>
+
+
+                    {isEditing && (
+                      <div style={{ marginTop: 'var(--space-md)', paddingTop: 'var(--space-md)', borderTop: '1px solid var(--border-default)', display: 'flex', flexDirection: 'column', gap: 'var(--space-sm)' }} onClick={e => e.stopPropagation()}>
+                        <label>Edit Integration (Override)</label>
+                        <input placeholder="Organization Name" value={editingCompany.name} onChange={e => setEditingCompany({...editingCompany, name: e.target.value})} />
+                        <input placeholder="API URL" value={editingCompany.apiUrl} onChange={e => setEditingCompany({...editingCompany, apiUrl: e.target.value})} />
+                        <input type="password" placeholder="New Master Board Key (Blank to keep existing)" value={editingCompany.boardKey} onChange={e => setEditingCompany({...editingCompany, boardKey: e.target.value})} />
+                        <div style={{ display: 'flex', gap: 'var(--space-sm)', justifyContent: 'flex-end', marginTop: 'var(--space-xs)' }}>
+                          <button onClick={() => setEditingCompany(null)} className="btn-outline">Cancel</button>
+                          <button onClick={handleEditSave} className="btn-primary">Save Changes</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
             
-            <form onSubmit={handleAddCompany} style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 'var(--space-md)' }} className="flex flex-col gap-sm">
-              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent)', marginBottom: 4 }}>+ Link New Company</div>
-              <input value={newCompany.apiUrl} onChange={e => setNewCompany({ ...newCompany, apiUrl: e.target.value })} placeholder="https://api.cowork.is" required style={{ padding: '10px 14px', borderRadius: 8, border: '1px solid var(--border-interactive)', background: 'rgba(255,255,255,0.03)', color: 'var(--text-primary)', outline: 'none', fontSize: 14 }} />
-              <input type="password" value={newCompany.boardKey} onChange={e => setNewCompany({ ...newCompany, boardKey: e.target.value })} placeholder="Master Board Key" required style={{ padding: '10px 14px', borderRadius: 8, border: '1px solid var(--border-interactive)', background: 'rgba(255,255,255,0.03)', color: 'var(--text-primary)', outline: 'none', fontSize: 14 }} />
-              <button type="submit" className="btn-outline" style={{ marginTop: 'var(--space-xs)', fontSize: 13, padding: '10px', fontWeight: 600 }}>Connect via Token</button>
-            </form>
+            {(showAddCompany || companies.length === 0) && (
+              <form onSubmit={handleAddCompany} style={{ borderTop: companies.length > 0 ? '1px solid var(--border-default)' : 'none', paddingTop: companies.length > 0 ? 'var(--space-md)' : 0 }} className="flex flex-col gap-sm">
+                <label style={{ color: 'var(--accent)' }}>+ Link New Company</label>
+                <input value={newCompany.name} onChange={e => setNewCompany({ ...newCompany, name: e.target.value })} placeholder="Company Name (e.g. My Startup)" />
+                <input value={newCompany.apiUrl} onChange={e => setNewCompany({ ...newCompany, apiUrl: e.target.value })} placeholder="https://api.cowork.is" required />
+                <input value={newCompany.id} onChange={e => setNewCompany({ ...newCompany, id: e.target.value })} placeholder="Target Company ID (Leave empty to Auto-Discover)" />
+                <input type="password" value={newCompany.boardKey} onChange={e => setNewCompany({ ...newCompany, boardKey: e.target.value })} placeholder="Master Board Key" required />
+                <button type="submit" className="btn-outline" style={{ marginTop: 'var(--space-xs)' }}>Connect via Token</button>
+              </form>
+            )}
           </section>
         </div>
 
@@ -315,52 +673,90 @@ export default function Dashboard() {
             
             return (
               <>
-                {/* Hire Form Header */}
-                <section className="glass-panel" style={{ padding: 'var(--space-xl)' }}>
-                  <h2 style={{ color: 'var(--accent)', marginBottom: 'var(--space-lg)' }}>Provision Agent for {activeCompany.name}</h2>
-                  <form onSubmit={handleAutoJoin} className="flex flex-col gap-md">
-                    <div>
-                      <div className="flex items-center justify-between" style={{ marginBottom: 'var(--space-xs)' }}>
-                        <label style={{ margin: 0 }}>Role Alias</label>
-                        <button type="button" onClick={handleDiscover} disabled={discovering} style={{ fontSize: 11, background: 'transparent', border: 'none', color: 'var(--accent)', cursor: 'pointer', padding: 0 }}>
-                          {discovering ? 'Probing...' : 'Probe Needs'}
+                {/* ── Unified Roster + Provision Panel ── */}
+                <section className="glass-panel flex flex-col gap-xl" style={{ padding: 'var(--space-xl)' }}>
+                  <div className="flex items-center justify-between" style={{ minHeight: '36px', marginBottom: 0 }}>
+                    <h2 style={{ fontSize: 24, margin: 0, display: 'flex', alignItems: 'center', gap: 'var(--space-md)' }}>
+                      {activeCompany.name || activeCompany.id} Roster
+                      {activeCompany.status === 'archived' && <span style={{ fontSize: 11, background: 'var(--bg-base)', color: 'var(--status-err)', padding: '2px 8px', borderRadius: 'var(--radius-sm)', fontWeight: 600, border: '1px solid var(--status-err)' }}>ARCHIVED</span>}
+                      {compAgents.length > 0 && (
+                        <button onClick={handleSyncCloud} disabled={isSyncing} className="btn-outline" style={{ fontSize: 13, padding: '4px 12px', display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
+                          {isSyncing ? '🔄 Syncing...' : '⟳ Sync Remote Cloud'}
                         </button>
-                      </div>
-                      <input value={role} onChange={e => setRole(e.target.value)} required style={{ width: '100%', padding: '10px 14px', borderRadius: 8, border: '1px solid var(--border-interactive)', background: 'rgba(255,255,255,0.03)', color: 'var(--text-primary)', outline: 'none', fontSize: 14 }} />
-                      {suggestedRoles.length > 0 && (
-                        <div className="flex" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
-                          {suggestedRoles.map(r => (
-                            <button key={r} type="button" onClick={() => setRole(r)} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: role === r ? 'var(--accent)' : 'var(--bg-base)', color: role === r ? 'var(--bg-base)' : 'var(--text-muted)', border: '1px solid var(--border-interactive)', cursor: 'pointer' }}>
-                              {r}
-                            </button>
-                          ))}
-                        </div>
                       )}
-                      {discoverError && (
-                        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--status-err)' }}>Error: {discoverError}</div>
+                    </h2>
+                    <div className="flex items-center gap-sm">
+                      {compAgents.length > 0 && (
+                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-secondary)', background: 'var(--accent-secondary-muted)', padding: '4px 12px', borderRadius: 'var(--radius-pill)' }}>
+                          {compAgents.length} active node{compAgents.length !== 1 ? 's' : ''}
+                        </span>
+                      )}
+                      {compAgents.length > 0 && (
+                        <button
+                          className={showProvisionForm ? 'btn-danger' : 'btn-outline'}
+                          onClick={() => setShowProvisionForm(f => !f)}
+                          style={{ padding: '2px 10px', fontSize: 12 }}
+                          title={showProvisionForm ? 'Cancel' : 'Add Agent'}
+                        >
+                          {showProvisionForm ? '✕' : '+'}
+                        </button>
                       )}
                     </div>
-                    <div>
-                      <label>Adapter Engine</label>
-                      <select value={executor} onChange={e => setExecutor(e.target.value)} style={{ width: '100%', padding: '0.625rem 0.75rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-interactive)', background: 'var(--bg-base)', color: 'var(--text-primary)' }}>
-                        {adapters.map(a => <option key={a} value={a}>{a}</option>)}
-                      </select>
-                    </div>
-                    <button type="submit" className="btn-outline" disabled={loading} style={{ marginTop: 'var(--space-sm)', borderColor: loading ? 'var(--border-subtle)' : 'var(--accent)', color: 'var(--accent)' }}>
-                      {loading ? 'Bootstrapping…' : 'Initiate Deployment'}
-                    </button>
-                  </form>
-                </section>
-
-                {/* Company Roster */}
-                <section className="glass-panel flex flex-col gap-xl" style={{ padding: 'var(--space-xl)', background: 'transparent', border: 'none', boxShadow: 'none' }}>
-                  <div className="flex items-center justify-between" style={{ marginBottom: 0 }}>
-                    <h2 style={{ fontSize: 24, margin: 0 }}>{activeCompany.name} Roster</h2>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-secondary)', background: 'var(--accent-secondary-muted)', padding: '4px 12px', borderRadius: 'var(--radius-pill)' }}>
-                      {compAgents.length} active node{compAgents.length !== 1 ? 's' : ''}
-                    </span>
                   </div>
 
+                  {/* Provision Form — shown always when 0 agents, toggle when agents exist */}
+                  {(showProvisionForm || compAgents.length === 0) && activeCompany.status !== 'archived' && (
+                    <form onSubmit={handleAutoJoin} className="flex flex-col gap-md" style={{ marginTop: compAgents.length === 0 ? 'var(--space-md)' : 0, paddingTop: compAgents.length > 0 ? 'var(--space-md)' : 0, borderTop: compAgents.length > 0 ? '1px solid var(--border-default)' : 'none' }}>
+                      <div className="flex items-center justify-between" style={{ marginBottom: 'var(--space-xs)' }}>
+                        <h3 style={{ margin: 0, fontSize: 15, color: 'var(--accent)' }}>Provision Agent for {activeCompany.name}</h3>
+                        <div className="flex items-center gap-sm">
+                          <button type="button" onClick={() => { handleDiscover(); setShowTemplateModal(true); }} className="btn-outline" style={{ fontSize: 13, padding: '6px 14px', borderColor: 'var(--accent)', color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                            Browse Market Templates
+                          </button>
+                        </div>
+                      </div>
+                      
+                      <div>
+                        <label style={{ marginBottom: 'var(--space-xs)', display: 'block' }}>Role Alias</label>
+                        <input value={role} onChange={e => setRole(e.target.value)} required />
+                        {suggestedRoles.length > 0 && (
+                          <div className="flex" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                            {suggestedRoles.map(r => (
+                              <button key={r.role} type="button" onClick={() => { setRole(r.role); setPendingSoul(r.soul || ''); }} style={{ fontSize: 11, padding: '2px 10px', borderRadius: 'var(--radius-pill)', background: role === r.role ? 'var(--accent-muted)' : 'transparent', color: role === r.role ? 'var(--accent)' : 'var(--text-muted)', border: `1px solid ${role === r.role ? 'var(--accent)' : 'var(--border-default)'}`, cursor: 'pointer' }}>
+                                {r.role}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {discoverError && (
+                          <div style={{ marginTop: 8, fontSize: 11, color: 'var(--status-err)' }}>Error: {discoverError}</div>
+                        )}
+                      </div>
+                      <div>
+                        <label>Adapter Engine</label>
+                        <select value={executor} onChange={e => setExecutor(e.target.value)}>
+                          {adapters.map(a => <option key={a} value={a}>{a}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label>LLM Model</label>
+                        <select value={newModel} onChange={e => setNewModel(e.target.value)}>
+                          <option value="">auto (Default)</option>
+                          <option value="claude-sonnet-4-20250514">claude-sonnet-4</option>
+                          <option value="claude-opus-4-20250514">claude-opus-4</option>
+                          <option value="gpt-5.4">gpt-5.4</option>
+                          <option value="o3">o3</option>
+                          <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                        </select>
+                      </div>
+                      <button type="submit" className="btn-outline" disabled={loading} style={{ marginTop: 'var(--space-xs)', borderColor: loading ? 'var(--border-subtle)' : 'var(--accent)', color: 'var(--accent)' }}>
+                        {loading ? 'Bootstrapping…' : 'Initiate Deployment'}
+                      </button>
+                    </form>
+                  )}
+
+                  {/* Agent Cards */}
                   <div className="flex flex-col gap-md">
                     {compAgents.length === 0 ? (
                       <div className="glass-panel" style={{ padding: 'var(--space-2xl) 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
@@ -370,6 +766,9 @@ export default function Dashboard() {
                       <AgentCard
                         key={id.filename}
                         identity={id}
+                        isRunning={runningWorkers.has(id.role)}
+                        liveRun={liveRuns[id.agentId]}
+                        onViewLogs={() => setViewingLogsFor(id.role)}
                         onIgnite={() => handleStartWorker(id.role)}
                         onBackup={() => handleBackup(id.role)}
                         onTerminate={() => handleTerminate(id.role)}
@@ -381,21 +780,51 @@ export default function Dashboard() {
                     ))}
                   </div>
                   
-                  {/* Retired Hub for this Company */}
+                  {/* Remote Roster Sync Block */}
+                  {remoteAgents && remoteAgents.filter(ra => !compAgents.some(ca => ca.agentId === ra.id)).length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)', marginTop: 'var(--space-xl)' }}>
+                      <div style={{ paddingBottom: 'var(--space-xs)', borderBottom: '1px solid var(--border-interactive)' }}>
+                        <h3 style={{ fontSize: 14, color: 'var(--text-muted)', margin: 0, textTransform: 'uppercase', letterSpacing: 1 }}>🌩️ Remote Roster (Cloud)</h3>
+                      </div>
+                      {remoteAgents.filter(ra => !compAgents.some(ca => ca.agentId === ra.id)).map(ra => {
+                        const isLive = ra.status === 'online' || ra.status === 'live';
+                        const isError = ra.status === 'error';
+                        const statusColor = isLive ? 'var(--status-ok)' : isError ? 'var(--status-err)' : 'var(--status-warn)';
+                        return (
+                          <div key={ra.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-elevated)', padding: 'var(--space-md) var(--space-lg)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-md)', flex: 1, minWidth: 0 }}>
+                              <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-pill)', background: statusColor, flexShrink: 0 }}></span>
+                              <div style={{ minWidth: 0 }}>
+                                <span style={{ fontSize: 14, fontWeight: 600 }}>{ra.role ? ra.role.toUpperCase() : ra.name}</span>
+                                <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ra.id}</div>
+                              </div>
+                            </div>
+                            <span style={{ fontSize: 11, color: statusColor, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0 }}>{ra.status || 'offline'}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Retired/Archived Agents */}
                   {(() => {
                     const compRetired = retiredIdentities.filter(id => id.companyId === selectedCompanyId);
                     if (compRetired.length === 0) return null;
                     return (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)', marginTop: 'var(--space-xl)' }}>
                         <div style={{ paddingBottom: 'var(--space-xs)', borderBottom: '1px solid rgba(255, 60, 60, 0.3)' }}>
-                          <h3 style={{ fontSize: 14, color: 'var(--status-err)', margin: 0, textTransform: 'uppercase', letterSpacing: 1 }}>♻️ Recycling Bin (Archived)</h3>
+                          <h3 style={{ fontSize: 14, color: 'var(--status-err)', margin: 0, textTransform: 'uppercase', letterSpacing: 1 }}>♻️ Senior Talent Pool (Archived)</h3>
                         </div>
                         {compRetired.map(id => (
                           <AgentCard
                             key={id.filename}
                             identity={id}
+                            isRunning={runningWorkers.has(id.role)}
+                            liveRun={liveRuns[id.agentId]}
                             isRetired={true}
                             onRestore={() => handleRestore(id.role)}
+                            onDownloadArchive={() => window.open(`/api/identity/export?role=${id.role}`, '_blank')}
+                            onObliterate={() => handleObliterate(id.role)}
                             onRefresh={fetchIdentities}
                             showToast={showToast}
                             adapters={adapters}
@@ -405,7 +834,7 @@ export default function Dashboard() {
                     );
                   })()}
                   
-                  {/* Legacy Orphans - always show them at the bottom just in case */}
+                  {/* Legacy Orphans */}
                   {orphanedAgents.length > 0 && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)', marginTop: 'var(--space-xl)' }}>
                       <div style={{ paddingBottom: 'var(--space-xs)', borderBottom: '1px solid rgba(255, 60, 60, 0.3)' }}>
@@ -415,6 +844,9 @@ export default function Dashboard() {
                         <AgentCard
                           key={id.filename}
                           identity={id}
+                          isRunning={runningWorkers.has(id.role)}
+                          liveRun={liveRuns[id.agentId]}
+                          onViewLogs={() => setViewingLogsFor(id.role)}
                           onIgnite={() => handleStartWorker(id.role)}
                           onBackup={() => handleBackup(id.role)}
                           onTerminate={() => handleTerminate(id.role)}
@@ -431,216 +863,124 @@ export default function Dashboard() {
           })()}
         </div>
       </div>
-    </div>
-  );
-}
 
-/* ── Telemetry Gauge Sub-component ── */
-function TelemetryGauge({ label, value, color }) {
-  const pct = parseFloat(value) || 0;
-  return (
-    <div style={{ minWidth: 130 }}>
-      <div style={{ fontSize: 11, fontWeight: 500, letterSpacing: '0.5px', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 6 }}>
-        {label}
-      </div>
-      <div className="progress-track">
-        <div className="progress-fill" style={{ width: `${Math.min(pct, 100)}%`, background: color }}></div>
-      </div>
-      <div style={{ fontSize: 22, fontWeight: 600, marginTop: 4, letterSpacing: '-0.5px' }}>
-        {value}<span style={{ fontSize: 13, fontWeight: 400, color: 'var(--text-muted)' }}>%</span>
-      </div>
-    </div>
-  );
-}
-
-/* ── Rich Agent Card Sub-component ── */
-function AgentCard({ identity: id, onIgnite, onBackup, onTerminate, onRefresh, showToast, adapters = [], isRetired, onRetire, onRestore }) {
-  const [expanded, setExpanded] = useState(false);
-  const [switching, setSwitching] = useState(false);
-  const [health, setHealth] = useState(null);
-
-  // Run health check on mount
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const res = await fetch('/api/health', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role: id.role, apiUrl: id.apiUrl })
-        });
-        const data = await res.json();
-        if (data.success) setHealth(data);
-      } catch { /* silent */ }
-    };
-    check();
-    const interval = setInterval(check, 15000);
-    return () => clearInterval(interval);
-  }, [id.role, id.apiUrl]);
-
-  const handleSwitch = async (field, value) => {
-    setSwitching(true);
-    try {
-      const body = { role: id.role };
-      body[field] = value;
-      const res = await fetch('/api/identity', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      const data = await res.json();
-      if (data.success) {
-        onRefresh();
-        showToast(`Switched ${field} to ${value}`, false);
-      } else {
-        showToast('Switch failed: ' + data.error, true);
-      }
-    } catch (err) { showToast('Error: ' + err.message, true); }
-    setSwitching(false);
-  };
-
-  const timeoutMin = Math.round((id.timeoutMs || 1800000) / 60000);
-
-  const metaStyle = { fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.8 };
-  const valStyle = { color: 'var(--text-secondary)', fontWeight: 500 };
-  const selectStyle = {
-    width: 'auto', display: 'inline', fontSize: 12, padding: '2px 6px',
-    background: 'var(--bg-base)', border: '1px solid var(--border-interactive)',
-    borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
-    cursor: 'pointer', verticalAlign: 'middle',
-  };
-
-  const StatusDot = ({ ok }) => (
-    <span className={`status-dot ${ok ? 'status-dot--ok' : 'status-dot--err'}`} style={{ width: 6, height: 6 }}></span>
-  );
-
-  return (
-    <div className="agent-card" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 'var(--space-md)' }}>
-      {/* Row 1: Header */}
-      <div className="flex items-center justify-between" style={{ cursor: 'pointer', padding: '4px 0' }} onClick={() => setExpanded(!expanded)}>
-        <div className="flex items-center gap-md">
-          <svg style={{ transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s', width: 20, height: 20, color: 'var(--text-muted)' }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-          <div>
-            <h3 style={{ fontSize: 18, marginTop: 0, marginBottom: 0 }}>{id.role.toUpperCase()}</h3>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontFamily: 'monospace' }}>
-              {id.agentId || '—'}
+      {/* Log Viewing Modal */}
+      {viewingLogsFor && (
+        <div className="log-modal__overlay">
+          <div className="log-modal__container">
+            <div className="log-modal__header flex justify-between items-center">
+              <h3 className="log-modal__title">Logs: {viewingLogsFor}</h3>
+              <button className="btn-outline" onClick={() => setViewingLogsFor(null)}>Close</button>
             </div>
+            <LogViewer role={viewingLogsFor} />
           </div>
         </div>
-        <div className="flex gap-sm" onClick={e => e.stopPropagation()}>
-          {!isRetired ? (
-            <>
-              <button className="btn-primary" onClick={onIgnite} style={{ fontSize: 12, padding: '6px 14px' }}>Ignite</button>
-              <button className="btn-outline" onClick={onTerminate} style={{ fontSize: 12, padding: '6px 14px' }}>Stop</button>
-              <button className="btn-outline" onClick={onBackup} style={{ fontSize: 12, padding: '6px 14px' }}>Backup</button>
-              <button className="btn-outline" onClick={onRetire} style={{ fontSize: 12, padding: '6px 14px', color: 'var(--status-err)', borderColor: 'rgba(255, 60, 60, 0.3)' }}>Retire ♻️</button>
-            </>
-          ) : (
-            <button className="btn-primary" onClick={onRestore} style={{ fontSize: 12, padding: '6px 14px' }}>Restore to Active</button>
-          )}
-        </div>
-      </div>
-
-      {expanded && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)' }}>
-
-      {/* Row 2: Config grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--space-md)', borderTop: '1px solid var(--border-subtle)', paddingTop: 'var(--space-md)' }}>
-
-        <div style={metaStyle}>
-          <div>API Server</div>
-          <div style={{ ...valStyle, color: 'var(--status-ok)', fontSize: 13 }}>{id.apiUrl || 'local'}</div>
-        </div>
-
-        <div style={metaStyle}>
-          <div>Company</div>
-          <div style={{ ...valStyle, fontSize: 11, fontFamily: 'monospace' }}>{id.companyId ? id.companyId.substring(0, 12) + '…' : '—'}</div>
-        </div>
-
-        <div style={metaStyle}>
-          <div>Timeout</div>
-          <div style={valStyle}>{timeoutMin} min</div>
-        </div>
-
-        <div style={metaStyle}>
-          <div>Adapter</div>
-          <select style={selectStyle} value={id.executor || adapters[0]} disabled={switching} onChange={e => handleSwitch('executor', e.target.value)}>
-            {adapters.map(a => <option key={a} value={a}>{a}</option>)}
-          </select>
-        </div>
-
-        <div style={metaStyle}>
-          <div>Model</div>
-          <select style={selectStyle} value={id.model || ''} disabled={switching} onChange={e => handleSwitch('model', e.target.value)}>
-            <option value="">auto</option>
-            <option value="claude-sonnet-4-20250514">claude-sonnet-4</option>
-            <option value="claude-opus-4-20250514">claude-opus-4</option>
-            <option value="gpt-5.4">gpt-5.4</option>
-            <option value="o3">o3</option>
-            <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-          </select>
-        </div>
-
-        <div style={metaStyle}>
-          <div>Status</div>
-          <div className="flex items-center gap-sm">
-            <StatusDot ok={true} />
-            <span style={{ ...valStyle, fontSize: 12 }}>Ready</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Row 3: Health Checks */}
-      <div style={{
-        display: 'grid', gridTemplateColumns: '1fr 1fr',
-        gap: 'var(--space-md)',
-        borderTop: '1px solid var(--border-subtle)',
-        paddingTop: 'var(--space-md)',
-      }}>
-        <div style={metaStyle}>
-          <div style={{ marginBottom: 4 }}>Local Connection</div>
-          {health ? (
-            <div className="flex flex-col" style={{ gap: 2 }}>
-              <div className="flex items-center gap-sm">
-                <StatusDot ok={health.local.identity} />
-                <span style={{ fontSize: 12, color: health.local.identity ? 'var(--text-secondary)' : 'var(--status-err)' }}>
-                  Identity File {health.local.identity ? '✓' : '✗ Missing'}
-                </span>
-              </div>
-              <div className="flex items-center gap-sm">
-                <StatusDot ok={health.local.workspace} />
-                <span style={{ fontSize: 12, color: health.local.workspace ? 'var(--text-secondary)' : 'var(--status-warn)' }}>
-                  Sandbox Dir {health.local.workspace ? '✓' : '✗ Uncreated'}
-                </span>
-              </div>
-            </div>
-          ) : (
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Checking...</span>
-          )}
-        </div>
-        <div style={metaStyle}>
-          <div style={{ marginBottom: 4 }}>Remote Connection</div>
-          {health ? (
-            <div className="flex flex-col" style={{ gap: 2 }}>
-              <div className="flex items-center gap-sm">
-                <StatusDot ok={health.remote.reachable} />
-                <span style={{ fontSize: 12, color: health.remote.reachable ? 'var(--status-ok)' : 'var(--status-err)' }}>
-                  {health.remote.reachable ? 'Connected' : 'Unreachable'}
-                </span>
-              </div>
-              {health.remote.latencyMs !== null && (
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  Latency: {health.remote.latencyMs}ms
-                  {health.remote.error ? ` — ${health.remote.error}` : ''}
-                </span>
-              )}
-            </div>
-          ) : (
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Checking...</span>
-          )}
-        </div>
-      </div>
-      </div>
       )}
+
+      {/* Template Selection Market Modal */}
+      {showTemplateModal && (
+        <div className="log-modal__overlay" onClick={() => setShowTemplateModal(false)} style={{ zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="glass-panel" onClick={e => e.stopPropagation()} style={{ width: '900px', height: '80vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)', border: '1px solid var(--border-interactive)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}>
+            
+            <div style={{ padding: 'var(--space-lg) var(--space-xl)', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-elevated)' }}>
+              <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                Template Marketplace
+              </h2>
+              <button className="btn-outline" onClick={() => setShowTemplateModal(false)} style={{ padding: '4px 12px' }}>✕ Close</button>
+            </div>
+
+            <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+              {/* Left Sidebar: Template Catalog */}
+              <div style={{ width: '280px', borderRight: '1px solid var(--border-subtle)', background: 'var(--bg-base)', overflowY: 'auto' }}>
+                {availableTemplates.length === 0 && discovering ? (
+                  <div style={{ padding: 'var(--space-lg)', textAlign: 'center', color: 'var(--text-muted)' }}>Loading Catalog...</div>
+                ) : availableTemplates.map(t => {
+                  const isSel = selectedTemplateId === t.id;
+                  return (
+                    <div 
+                      key={t.id} 
+                      onClick={() => { setSelectedTemplateId(t.id); handleDiscover(t.id); }}
+                      style={{ padding: 'var(--space-md) var(--space-lg)', cursor: 'pointer', borderBottom: '1px solid var(--border-default)', borderLeft: `4px solid ${isSel ? 'var(--accent)' : 'transparent'}`, background: isSel ? 'var(--bg-elevated)' : 'transparent' }}
+                    >
+                      <div style={{ fontWeight: 600, fontSize: 14, color: isSel ? 'var(--text-primary)' : 'var(--text-secondary)' }}>{t.name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontFamily: 'monospace' }}>{t.id}</div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Right Panel: Team Composition */}
+              <div style={{ flex: 1, padding: 'var(--space-2xl)', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+                {!selectedTemplateId ? (
+                  <div style={{ margin: 'auto', textAlign: 'center', color: 'var(--text-muted)' }}>
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" style={{ opacity: 0.5, marginBottom: 16 }}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <div>Select a template from the catalog</div>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ marginBottom: 'var(--space-2xl)' }}>
+                      <h3 style={{ margin: 0, fontSize: 22 }}>
+                        {availableTemplates.find(t => t.id === selectedTemplateId)?.name}
+                      </h3>
+                      <p style={{ color: 'var(--text-secondary)', marginTop: 'var(--space-sm)', fontSize: 14 }}>
+                        Review the team composition below. Check the agents you wish to deploy into the active roster. Agents currently online are disabled.
+                      </p>
+                    </div>
+
+                    <div style={{ flex: 1 }}>
+                      {discovering ? (
+                        <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Analyzing Composition...</div>
+                      ) : (
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-md)' }}>
+                          {suggestedRoles.map((r, i) => {
+                            const isSelected = templateSelections[r.role];
+                            return (
+                              <label key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-md)', padding: 'var(--space-md)', background: r.hired ? 'var(--bg-base)' : (isSelected ? 'var(--bg-elevated)' : 'transparent'), border: `1px solid ${r.hired ? 'var(--border-default)' : (isSelected ? 'var(--border-interactive)' : 'var(--border-subtle)')}`, borderRadius: 'var(--radius-md)', cursor: r.hired ? 'not-allowed' : 'pointer', opacity: r.hired ? 0.6 : 1, transition: 'all 0.2s' }}>
+                                <input 
+                                  type="checkbox" 
+                                  checked={r.hired ? true : !!isSelected} 
+                                  disabled={r.hired}
+                                  onChange={(e) => {
+                                    if (!r.hired) setTemplateSelections(prev => ({ ...prev, [r.role]: e.target.checked }));
+                                  }}
+                                  style={{ marginTop: 4 }}
+                                />
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 14 }}>{r.role}</div>
+                                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                                    {r.soul ? r.soul.substring(0, 80) + '...' : 'Base configuration identity.'}
+                                  </div>
+                                  {r.hired && <div style={{ fontSize: 10, color: 'var(--status-ok)', fontWeight: 600, marginTop: 6, textTransform: 'uppercase' }}>✓ Active Node</div>}
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ marginTop: 'var(--space-2xl)', paddingTop: 'var(--space-xl)', borderTop: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 'var(--space-md)' }}>
+                      <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                        {suggestedRoles.filter(r => !r.hired && templateSelections[r.role]).length} agents selected
+                      </span>
+                      <button 
+                        onClick={handleBulkDeploy} 
+                        disabled={loading || suggestedRoles.filter(r => !r.hired && templateSelections[r.role]).length === 0} 
+                        className="btn-primary" 
+                        style={{ padding: '8px 24px', fontSize: 14 }}
+                      >
+                        {loading ? 'Deploying network...' : 'Deploy Selected Agents'}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

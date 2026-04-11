@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
 import { existsSync } from 'fs';
 import path from 'path';
-
-const DATA_DIR = path.join(process.cwd(), '.data');
-const IDENTITIES_DIR = path.join(DATA_DIR, 'identities');
-const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
+import { WORKSPACES_DIR } from '@/lib/paths';
+import getDb from '@/lib/db';
 
 export async function POST(req) {
   try {
@@ -21,7 +19,10 @@ export async function POST(req) {
     };
 
     // 1. Local checks
-    result.local.identity = existsSync(path.join(IDENTITIES_DIR, `${role}.env`));
+    const db = getDb();
+    const identityExists = !!db.prepare(`SELECT 1 FROM identities WHERE role = ? AND status = 'active'`).get(role);
+    
+    result.local.identity = identityExists;
     result.local.workspace = existsSync(path.join(WORKSPACES_DIR, role));
 
     // 2. Remote check — ping the API server
@@ -53,3 +54,4 @@ export async function POST(req) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }
+

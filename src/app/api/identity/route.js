@@ -1,47 +1,37 @@
 import { NextResponse } from 'next/server';
-import { writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from 'fs';
+import { mkdirSync, existsSync, rmSync } from 'fs';
+import { spawnSync } from 'child_process';
 import path from 'path';
 import os from 'os';
+import { getNodeSettings } from '@/lib/nodeSettings';
+import { DATA_DIR } from '@/lib/paths';
+import getDb from '@/lib/db';
 
-// Resolve paths consistently: .data lives inside the dashboard project root.
-const ROOT_DIR = process.cwd();
-const DATA_DIR = path.join(ROOT_DIR, '.data');
-const IDENTITIES_DIR = path.join(DATA_DIR, 'identities');
-const RETIRED_DIR = path.join(DATA_DIR, 'retired_identities');
-const COMPANIES_FILE = path.join(DATA_DIR, 'companies.json');
-
-if (!existsSync(IDENTITIES_DIR)) mkdirSync(IDENTITIES_DIR, { recursive: true });
-if (!existsSync(RETIRED_DIR)) mkdirSync(RETIRED_DIR, { recursive: true });
+const isValidRoleName = (name) => /^[a-zA-Z0-9_-]+$/.test(name);
 
 export async function GET() {
   try {
-    const parseIdentities = (dir) => {
-      if (!existsSync(dir)) return [];
-      const files = readdirSync(dir).filter(f => f.endsWith('.env') && !f.startsWith('_'));
-      return files.map(f => {
-        const text = readFileSync(path.join(dir, f), 'utf8');
-        const env = {};
-        text.split('\n').forEach(line => {
-          const match = line.trim().match(/^export\s+([A-Z0-9_]+)=(.*)$/);
-          if (match) env[match[1]] = match[2].replace(/"/g, '');
-        });
-        return {
-          filename: f,
-          role: env.RUNNER_ROLE || f.replace('.env', ''),
-          agentId: env.PAPERCLIP_AGENT_ID || '',
-          apiUrl: env.PAPERCLIP_API_URL || '',
-          companyId: env.PAPERCLIP_COMPANY_ID || '',
-          executor: env.RUNNER_EXECUTOR || 'claude',
-          model: env.RUNNER_MODEL || '',
-          timeoutMs: parseInt(env.RUNNER_TIMEOUT_MS) || 1800000,
-        };
-      });
-    };
+    const db = getDb();
+    const rows = db.prepare(`SELECT * FROM identities`).all();
+    
+    const mapRow = (row) => ({
+      filename: `${row.role}.conf`, // backward compatibility
+      role: row.role,
+      agentId: row.agentId || '',
+      apiUrl: row.apiUrl || '',
+      companyId: row.companyId || '',
+      executor: row.executor || 'claude',
+      model: row.model || '',
+      timeoutMs: row.timeoutMs || 1800000,
+    });
+
+    const identities = rows.filter(r => r.status === 'active' && !r.role.startsWith('_')).map(mapRow);
+    const retiredIdentities = rows.filter(r => r.status === 'retired' && !r.role.startsWith('_')).map(mapRow);
 
     return NextResponse.json({ 
       success: true, 
-      identities: parseIdentities(IDENTITIES_DIR),
-      retiredIdentities: parseIdentities(RETIRED_DIR)
+      identities,
+      retiredIdentities
     });
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
@@ -51,40 +41,62 @@ export async function GET() {
 export async function POST(req) {
   try {
     const body = await req.json();
-    const { companyId, roleName, executor } = body;
+    const { companyId, roleName, executor, model, initialSoul } = body;
 
     if (!companyId || !roleName) {
       return NextResponse.json({ success: false, error: "Missing required fields (companyId, roleName) for Auto-Join." }, { status: 400 });
     }
 
-    if (!existsSync(COMPANIES_FILE)) {
-      return NextResponse.json({ success: false, error: "No companies vault found. Please configure a company first." }, { status: 400 });
+    if (!isValidRoleName(roleName)) {
+      return NextResponse.json({ success: false, error: "Invalid role name. Only alphanumeric, hyphens, and underscores allowed." }, { status: 400 });
     }
+
+    const db = getDb();
+    const company = db.prepare(`SELECT * FROM companies WHERE id = ?`).get(companyId);
     
-    const companies = JSON.parse(readFileSync(COMPANIES_FILE, 'utf8'));
-    const company = companies.find(c => c.id === companyId);
     if (!company) {
       return NextResponse.json({ success: false, error: `Company ${companyId} not found in local vault.` }, { status: 404 });
     }
 
     const { apiUrl: url, boardKey } = company;
 
-    // 1. Create Agent on the remote cloud server
+    const nodeSettings = getNodeSettings();
+    const envOverrides = {};
+    if (nodeSettings.proxy?.httpsProxy) {
+      envOverrides.HTTPS_PROXY = nodeSettings.proxy.httpsProxy;
+      envOverrides.HTTP_PROXY = nodeSettings.proxy.httpsProxy;
+      envOverrides.ALL_PROXY = nodeSettings.proxy.httpsProxy;
+    }
+    if (nodeSettings.proxy?.openaiBaseUrl) {
+      envOverrides.OPENAI_BASE_URL = nodeSettings.proxy.openaiBaseUrl;
+    }
+
+    const adapterConfig = model ? { model } : {};
+    if (initialSoul) adapterConfig.bootstrapPrompt = initialSoul;
+    if (Object.keys(envOverrides).length > 0) {
+      adapterConfig.env = envOverrides;
+    }
+    
+    let remoteAdapterType = (executor || "claude_local").replace(/-/g, '_');
+    if (nodeSettings.frp?.serverAddr && nodeSettings.frp?.remotePort) {
+       remoteAdapterType = "http";
+       adapterConfig.url = `http://${nodeSettings.frp.serverAddr}:${nodeSettings.frp.remotePort}/api/webhook/paperclip`;
+    }
+
     const createRes = await fetch(`${url}/api/companies/${companyId}/agents`, {
       method: "POST",
       headers: { "Authorization": `Bearer ${boardKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         name: `Matrix Node ${roleName} (${os.hostname()})`,
         role: roleName,
-        adapter_type: "process",
-        adapter_config: { executor: executor || "claude" }
+        adapterType: remoteAdapterType,
+        adapterConfig
       })
     });
 
     if (!createRes.ok) throw new Error(`Agent creation failed HTTP ${createRes.status}`);
     const agent = await createRes.json();
 
-    // 2. Obtain API Key from remote
     const keyRes = await fetch(`${url}/api/agents/${agent.id}/keys`, {
       method: "POST",
       headers: { "Authorization": `Bearer ${boardKey}`, "Content-Type": "application/json" },
@@ -95,21 +107,32 @@ export async function POST(req) {
     const keyData = await keyRes.json();
     const apiKey = keyData.key || keyData.apiKey || keyData.plaintextKey || keyData.token;
 
-    // 3. Write locally to identities vault
     const timeoutMs = 1800000;
-    const envContent = [
-      `# ATOMIC IDENTITY FILE GENERATED BY MATRIX DASHBOARD`,
-      `export PAPERCLIP_API_URL="${url}"`,
-      `export PAPERCLIP_COMPANY_ID="${companyId}"`,
-      `export PAPERCLIP_AGENT_ID="${agent.id}"`,
-      `export PAPERCLIP_API_KEY="${apiKey}"`,
-      `export RUNNER_EXECUTOR="${executor || 'claude'}"`,
-      `export RUNNER_TIMEOUT_MS="${timeoutMs}"`,
-      `export RUNNER_ROLE="${roleName}"`,
-    ].join("\n");
+    
+    // Write locally to SQLite identities vault
+    db.prepare(`
+      INSERT OR REPLACE INTO identities 
+      (role, agentId, apiUrl, companyId, executor, model, timeoutMs, apiKey, status) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+    `).run(
+      roleName,
+      agent.id,
+      url,
+      companyId,
+      executor || 'claude',
+      model || null,
+      timeoutMs,
+      apiKey
+    );
 
-    const envPath = path.join(IDENTITIES_DIR, `${roleName}.env`);
-    writeFileSync(envPath, envContent, "utf8");
+    // Auto-create sandbox workspace directory for this agent
+    const workspaceDir = path.join(DATA_DIR, 'workspaces', agent.id);
+    if (!existsSync(workspaceDir)) mkdirSync(workspaceDir, { recursive: true });
+    
+    if (initialSoul) {
+      const { writeFileSync } = require('fs');
+      writeFileSync(path.join(workspaceDir, 'SOUL.md'), initialSoul, 'utf8');
+    }
 
     return NextResponse.json({ success: true, agentId: agent.id, role: roleName });
 
@@ -121,59 +144,72 @@ export async function POST(req) {
 export async function PATCH(req) {
   try {
     const { role, executor, model } = await req.json();
-    if (!role) {
-      return NextResponse.json({ success: false, error: "Role is required." }, { status: 400 });
+    if (!role || !isValidRoleName(role)) {
+      return NextResponse.json({ success: false, error: "Role is required and must be valid." }, { status: 400 });
     }
 
-    const envPath = path.join(IDENTITIES_DIR, `${role}.env`);
-    if (!existsSync(envPath)) {
+    const db = getDb();
+    const existing = db.prepare(`SELECT * FROM identities WHERE role = ?`).get(role);
+    
+    if (!existing) {
       return NextResponse.json({ success: false, error: `Identity ${role} not found.` }, { status: 404 });
     }
 
-    let text = readFileSync(envPath, 'utf8');
+    db.prepare(`UPDATE identities SET executor = COALESCE(?, executor), model = COALESCE(?, model) WHERE role = ?`).run(
+      executor || null, 
+      model || null, 
+      role
+    );
 
-    // Replace or append RUNNER_EXECUTOR
-    if (executor) {
-      if (text.match(/^export RUNNER_EXECUTOR=/m)) {
-        text = text.replace(/^export RUNNER_EXECUTOR=.*$/m, `export RUNNER_EXECUTOR="${executor}"`);
-      } else {
-        text += `\nexport RUNNER_EXECUTOR="${executor}"`;
-      }
-    }
-
-    // Replace or append RUNNER_MODEL
-    if (model) {
-      if (text.match(/^export RUNNER_MODEL=/m)) {
-        text = text.replace(/^export RUNNER_MODEL=.*$/m, `export RUNNER_MODEL="${model}"`);
-      } else {
-        text += `\nexport RUNNER_MODEL="${model}"`;
-      }
-    }
-
-    writeFileSync(envPath, text, 'utf8');
-    return NextResponse.json({ success: true, message: `Updated ${role}: executor=${executor}, model=${model}` });
+    return NextResponse.json({ success: true, message: `Updated ${role}` });
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }
 
 export async function DELETE(req) {
-  // [HOTFIX] Forcing Next.js Turbopack invalidation tick 
   try {
     const { role } = await req.json();
-    if (!role) return NextResponse.json({ success: false, error: "Role missing." }, { status: 400 });
+    if (!role || !isValidRoleName(role)) return NextResponse.json({ success: false, error: "Role missing or invalid." }, { status: 400 });
 
-    const activeFile = path.join(IDENTITIES_DIR, `${role}.env`);
-    const retiredFile = path.join(RETIRED_DIR, `${role}.env`);
-
-    if (!existsSync(activeFile)) {
+    const db = getDb();
+    const existing = db.prepare(`SELECT * FROM identities WHERE role = ? AND status = 'active'`).get(role);
+    
+    if (!existing) {
       return NextResponse.json({ success: false, error: `Agent ${role} is not an active node.` }, { status: 404 });
     }
 
-    // Physical File Move
-    const fileData = readFileSync(activeFile, 'utf8');
-    writeFileSync(retiredFile, fileData, 'utf8');
-    require('fs').unlinkSync(activeFile);
+    // Set DB status to retired
+    db.prepare(`UPDATE identities SET status = 'retired' WHERE role = ?`).run(role);
+
+    // Sync deletion to Paperclip Cloud
+    if (existing.companyId && existing.agentId) {
+      const company = db.prepare(`SELECT boardKey FROM companies WHERE id = ?`).get(existing.companyId);
+      if (company && company.boardKey) {
+        try {
+          fetch(`${existing.apiUrl}/api/agents/${existing.agentId}`, {
+            method: "DELETE",
+            headers: { "Authorization": `Bearer ${company.boardKey}` }
+          }).catch(e => console.error(`[Matrix-API] Failed to report node obliteration to Cloud:`, e));
+        } catch (e) {}
+      }
+    }
+
+    // Pack Workspace Directory using its unique agentId
+    const workspaceDir = path.join(DATA_DIR, 'workspaces', existing.agentId);
+    const retiredWorkspacesDir = path.join(DATA_DIR, 'retired_workspaces');
+    if (!existsSync(retiredWorkspacesDir)) mkdirSync(retiredWorkspacesDir, { recursive: true });
+
+    if (existsSync(workspaceDir)) {
+      try {
+        const timestamp = Date.now();
+        const tarPath = path.join(retiredWorkspacesDir, `${role}-${timestamp}.tar.gz`);
+        spawnSync('tar', ['-czf', tarPath, '-C', path.join(DATA_DIR, 'workspaces'), existing.agentId], { stdio: 'inherit' });
+        rmSync(workspaceDir, { recursive: true, force: true });
+      } catch (e) {
+        console.error(`Failed to pack workspace for ${role}:`, e);
+      }
+    }
 
     return NextResponse.json({ success: true, message: `Node ${role} successfully retired and archived.` });
   } catch (error) {

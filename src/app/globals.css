@@ -300,3 +300,211 @@ input:focus, select:focus {
 .gap-md { gap: var(--space-md); }
 .gap-lg { gap: var(--space-lg); }
 .gap-xl { gap: var(--space-xl); }
+
+/* ── Toast Notification ── */
+.toast {
+  position: fixed;
+  top: 30px;
+  right: 30px;
+  z-index: 9999;
+  color: var(--text-primary);
+  padding: 12px 20px;
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  font-size: 13px;
+  font-weight: 500;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.toast--ok { background: var(--status-ok); }
+.toast--err { background: var(--status-err); }
+
+/* ── Dashboard Layout ── */
+.dashboard {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: var(--space-2xl) var(--space-xl);
+}
+
+.dashboard__subtitle {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin-top: var(--space-sm);
+}
+
+/* ── Telemetry Gauge ── */
+.telemetry-gauge {
+  min-width: 130px;
+}
+
+.telemetry-gauge__label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.telemetry-gauge__value {
+  font-size: 22px;
+  font-weight: 600;
+  margin-top: 4px;
+  letter-spacing: -0.5px;
+}
+
+.telemetry-gauge__unit {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* ── Log Viewer ── */
+.log-viewer {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-lg);
+  font-family: monospace;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--bg-base);
+  white-space: pre-wrap;
+  word-break: break-all;
+  box-sizing: border-box;
+}
+
+/* ── Log Modal ── */
+.log-modal__overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.8);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.log-modal__container {
+  width: 80vw;
+  height: 80vh;
+  background: var(--bg-base);
+  border: 1px solid var(--border-interactive);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+}
+
+.log-modal__header {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+
+.log-modal__title {
+  margin: 0;
+  font-family: monospace;
+  color: var(--text-primary);
+}
+
+/* ── Agent Card sub-elements ── */
+.agent-card__chevron {
+  transition: transform 0.2s;
+  width: 20px;
+  height: 20px;
+  color: var(--text-muted);
+}
+
+.agent-card__agent-id {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-family: monospace;
+}
+
+.agent-card__live-strip {
+  margin: 4px 0;
+  padding: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-interactive);
+  border-radius: var(--radius-sm);
+}
+
+.agent-card__live-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.agent-card__live-task {
+  font-size: 13px;
+  font-family: monospace;
+  color: var(--status-warn);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-card__logs-btn {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.agent-card__config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: var(--space-md);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-md);
+}
+
+.agent-card__health-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-md);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--space-md);
+}
+
+.agent-card__val {
+  color: var(--text-secondary);
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.agent-card__val--ok {
+  color: var(--status-ok);
+}
+
+.agent-card__val--mono {
+  font-family: monospace;
+}
+
+.agent-card__inline-select {
+  width: auto;
+  display: inline;
+  font-size: 12px;
+  padding: 2px 6px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-interactive);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.agent-card__health-text {
+  font-size: 14px;
+}
+
+.agent-card__health-text--muted {
+  color: var(--text-muted);
+}
+
+.agent-card__latency {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+

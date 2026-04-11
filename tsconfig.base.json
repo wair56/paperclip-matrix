@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "paths": {
+      "@paperclipai/adapter-utils": ["./src/lib/adapter-utils/dist/index.js"],
+      "@paperclipai/adapter-utils/*": ["./src/lib/adapter-utils/dist/*"]
+    }
+  }
+}
