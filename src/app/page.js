@@ -38,7 +38,11 @@ export default function Dashboard() {
   const [adapters, setAdapters] = useState(['claude-local', 'codex-local', 'gemini-local']);
   
   // Modal states
+  const [templateSearch, setTemplateSearch] = useState('');
+  const [roleSearch, setRoleSearch] = useState('');
   const [showTemplateModal, setShowTemplateModal] = useState(false);
+  const [showCheckoutModal, setShowCheckoutModal] = useState(false);
+  const [inspectingAgent, setInspectingAgent] = useState(null);
   const [templateSelections, setTemplateSelections] = useState({});
 
   const fetchIdentities = useCallback(async () => {
@@ -291,14 +295,8 @@ export default function Dashboard() {
         setAvailableTemplates(data.availableTemplates || []);
         if (data.agents) setRemoteAgents(data.agents);
         
-        // Modal Flow: pre-select all unhired roles
-        if (tid !== undefined && data.neededRoles) {
-          const sels = {};
-          data.neededRoles.forEach(r => {
-            if (!r.hired) sels[r.role] = true;
-          });
-          setTemplateSelections(sels);
-        } else if (!showTemplateModal && data.neededRoles && data.neededRoles.length > 0) {
+        // Modal Flow: do not auto-select or wipe cart state
+        if (tid === undefined && !showTemplateModal && data.neededRoles && data.neededRoles.length > 0) {
            // Single provision logic
            const unhired = data.neededRoles.filter(r => !r.hired);
            if (unhired.length > 0) {
@@ -316,7 +314,7 @@ export default function Dashboard() {
   const handleBulkDeploy = async () => {
     if (!selectedCompanyId) return showToast("Select a company first.", true);
     setLoading(true);
-    const toDeploy = suggestedRoles.filter(r => !r.hired && templateSelections[r.role]);
+    const toDeploy = Object.values(templateSelections);
     let successCount = 0;
     
     for (const r of toDeploy) {
@@ -324,7 +322,7 @@ export default function Dashboard() {
         const res = await fetch('/api/identity', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ companyId: selectedCompanyId, roleName: r.role, executor, model: newModel, initialSoul: r.soul })
+          body: JSON.stringify({ companyId: selectedCompanyId, roleName: r.role, executor: r.engine, model: r.model, initialSoul: r.soul })
         });
         const data = await res.json();
         if (data.success) {
@@ -335,7 +333,8 @@ export default function Dashboard() {
     }
     
     showToast(`Deployed ${successCount}/${toDeploy.length} network agents!`, false);
-    setShowTemplateModal(false);
+    setShowCheckoutModal(false);
+    setTemplateSelections({});
     fetchIdentities();
     setLoading(false);
   };
@@ -433,7 +432,7 @@ export default function Dashboard() {
 
 
   return (
-    <div style={{ maxWidth: 1200, margin: '0 auto', padding: 'var(--space-2xl) var(--space-xl)' }}>
+    <div style={{ width: '85%', maxWidth: 1920, margin: '0 auto', padding: 'var(--space-2xl) var(--space-xl)' }}>
       {toast && (
         <div className={`toast ${toast.isError ? 'toast--err' : 'toast--ok'}`}>
           {toast.message}
@@ -720,15 +719,6 @@ export default function Dashboard() {
                       <div>
                         <label style={{ marginBottom: 'var(--space-xs)', display: 'block' }}>Role Alias</label>
                         <input value={role} onChange={e => setRole(e.target.value)} required />
-                        {suggestedRoles.length > 0 && (
-                          <div className="flex" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
-                            {suggestedRoles.map(r => (
-                              <button key={r.role} type="button" onClick={() => { setRole(r.role); setPendingSoul(r.soul || ''); }} style={{ fontSize: 11, padding: '2px 10px', borderRadius: 'var(--radius-pill)', background: role === r.role ? 'var(--accent-muted)' : 'transparent', color: role === r.role ? 'var(--accent)' : 'var(--text-muted)', border: `1px solid ${role === r.role ? 'var(--accent)' : 'var(--border-default)'}`, cursor: 'pointer' }}>
-                                {r.role}
-                              </button>
-                            ))}
-                          </div>
-                        )}
                         {discoverError && (
                           <div style={{ marginTop: 8, fontSize: 11, color: 'var(--status-err)' }}>Error: {discoverError}</div>
                         )}
@@ -880,7 +870,7 @@ export default function Dashboard() {
       {/* Template Selection Market Modal */}
       {showTemplateModal && (
         <div className="log-modal__overlay" onClick={() => setShowTemplateModal(false)} style={{ zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div className="glass-panel" onClick={e => e.stopPropagation()} style={{ width: '900px', height: '80vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)', border: '1px solid var(--border-interactive)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}>
+          <div className="glass-panel" onClick={e => e.stopPropagation()} style={{ width: '85%', maxWidth: '1600px', height: '85vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)', border: '1px solid var(--border-interactive)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}>
             
             <div style={{ padding: 'var(--space-lg) var(--space-xl)', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-elevated)' }}>
               <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -892,22 +882,40 @@ export default function Dashboard() {
 
             <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
               {/* Left Sidebar: Template Catalog */}
-              <div style={{ width: '280px', borderRight: '1px solid var(--border-subtle)', background: 'var(--bg-base)', overflowY: 'auto' }}>
-                {availableTemplates.length === 0 && discovering ? (
-                  <div style={{ padding: 'var(--space-lg)', textAlign: 'center', color: 'var(--text-muted)' }}>Loading Catalog...</div>
-                ) : availableTemplates.map(t => {
-                  const isSel = selectedTemplateId === t.id;
-                  return (
-                    <div 
-                      key={t.id} 
-                      onClick={() => { setSelectedTemplateId(t.id); handleDiscover(t.id); }}
-                      style={{ padding: 'var(--space-md) var(--space-lg)', cursor: 'pointer', borderBottom: '1px solid var(--border-default)', borderLeft: `4px solid ${isSel ? 'var(--accent)' : 'transparent'}`, background: isSel ? 'var(--bg-elevated)' : 'transparent' }}
-                    >
-                      <div style={{ fontWeight: 600, fontSize: 14, color: isSel ? 'var(--text-primary)' : 'var(--text-secondary)' }}>{t.name}</div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontFamily: 'monospace' }}>{t.id}</div>
-                    </div>
-                  );
-                })}
+              <div style={{ width: '280px', borderRight: '1px solid var(--border-subtle)', background: 'var(--bg-base)', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ padding: 'var(--space-md)', borderBottom: '1px solid var(--border-subtle)' }}>
+                  <input
+                    type="text"
+                    placeholder="Search templates..."
+                    value={templateSearch}
+                    onChange={(e) => setTemplateSearch(e.target.value)}
+                    style={{ width: '100%', padding: '6px 12px', fontSize: 13, borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-interactive)', background: 'var(--bg-surface)' }}
+                  />
+                </div>
+                <div style={{ flex: 1, overflowY: 'auto' }}>
+                  {availableTemplates.length === 0 && discovering ? (
+                    <div style={{ padding: 'var(--space-lg)', textAlign: 'center', color: 'var(--text-muted)' }}>Loading Catalog...</div>
+                  ) : availableTemplates.filter(t => t.name.toLowerCase().includes(templateSearch.toLowerCase()) || t.id.toLowerCase().includes(templateSearch.toLowerCase())).map(t => {
+                    const isSel = selectedTemplateId === t.id;
+                    return (
+                      <div 
+                        key={t.id} 
+                        onClick={() => { setSelectedTemplateId(t.id); handleDiscover(t.id); setRoleSearch(''); }}
+                        style={{ padding: 'var(--space-md) var(--space-lg)', cursor: 'pointer', borderBottom: '1px solid var(--border-default)', borderLeft: `4px solid ${isSel ? 'var(--accent)' : 'transparent'}`, background: isSel ? 'var(--bg-elevated)' : 'transparent' }}
+                      >
+                        <div style={{ fontWeight: 600, fontSize: 14, color: isSel ? 'var(--text-primary)' : 'var(--text-secondary)' }}>{t.name}</div>
+                        {t.cn && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{t.cn}</div>}
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontFamily: 'monospace', display: 'flex', justifyContent: 'space-between' }}>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.id}</span>
+                          {t.roleCount !== undefined && <span style={{ background: 'var(--bg-surface)', padding: '2px 6px', borderRadius: '4px', flexShrink: 0 }}>{t.roleCount} roles</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ padding: 'var(--space-md)', fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', borderTop: '1px solid var(--border-subtle)', background: 'var(--bg-surface)' }}>
+                  {availableTemplates.filter(t => t.name.toLowerCase().includes(templateSearch.toLowerCase()) || t.id.toLowerCase().includes(templateSearch.toLowerCase())).length} templates available
+                </div>
               </div>
 
               {/* Right Panel: Team Composition */}
@@ -920,62 +928,202 @@ export default function Dashboard() {
                 ) : (
                   <>
                     <div style={{ marginBottom: 'var(--space-2xl)' }}>
-                      <h3 style={{ margin: 0, fontSize: 22 }}>
+                      <h3 style={{ margin: 0, fontSize: 22, display: 'flex', alignItems: 'center' }}>
                         {availableTemplates.find(t => t.id === selectedTemplateId)?.name}
+                        {availableTemplates.find(t => t.id === selectedTemplateId)?.cn && (
+                          <span style={{ fontSize: 16, color: 'var(--text-muted)', marginLeft: 12, fontWeight: 400 }}>
+                            {availableTemplates.find(t => t.id === selectedTemplateId)?.cn}
+                          </span>
+                        )}
                       </h3>
                       <p style={{ color: 'var(--text-secondary)', marginTop: 'var(--space-sm)', fontSize: 14 }}>
                         Review the team composition below. Check the agents you wish to deploy into the active roster. Agents currently online are disabled.
                       </p>
                     </div>
 
-                    <div style={{ flex: 1 }}>
-                      {discovering ? (
-                        <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Analyzing Composition...</div>
-                      ) : (
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-md)' }}>
-                          {suggestedRoles.map((r, i) => {
-                            const isSelected = templateSelections[r.role];
-                            return (
-                              <label key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-md)', padding: 'var(--space-md)', background: r.hired ? 'var(--bg-base)' : (isSelected ? 'var(--bg-elevated)' : 'transparent'), border: `1px solid ${r.hired ? 'var(--border-default)' : (isSelected ? 'var(--border-interactive)' : 'var(--border-subtle)')}`, borderRadius: 'var(--radius-md)', cursor: r.hired ? 'not-allowed' : 'pointer', opacity: r.hired ? 0.6 : 1, transition: 'all 0.2s' }}>
-                                <input 
-                                  type="checkbox" 
-                                  checked={r.hired ? true : !!isSelected} 
-                                  disabled={r.hired}
-                                  onChange={(e) => {
-                                    if (!r.hired) setTemplateSelections(prev => ({ ...prev, [r.role]: e.target.checked }));
-                                  }}
-                                  style={{ marginTop: 4 }}
-                                />
-                                <div style={{ minWidth: 0 }}>
-                                  <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 14 }}>{r.role}</div>
-                                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                                    {r.soul ? r.soul.substring(0, 80) + '...' : 'Base configuration identity.'}
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                      <div style={{ marginBottom: 'var(--space-md)' }}>
+                        <input
+                          type="text"
+                          placeholder={`Filter ${suggestedRoles.length} roles...`}
+                          value={roleSearch}
+                          onChange={(e) => setRoleSearch(e.target.value)}
+                          style={{ width: '100%', padding: '8px 12px', fontSize: 14, borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-interactive)', background: 'var(--bg-base)' }}
+                        />
+                      </div>
+                      
+                      <div style={{ flex: 1, overflowY: 'auto' }}>
+                        {discovering ? (
+                          <div style={{ textAlign: 'center', color: 'var(--text-muted)', marginTop: 'var(--space-xl)' }}>Analyzing Composition...</div>
+                        ) : (
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: 'var(--space-md)' }}>
+                            {suggestedRoles.filter(r => r.role.toLowerCase().includes(roleSearch.toLowerCase()) || (r.soul && r.soul.toLowerCase().includes(roleSearch.toLowerCase()))).map((r, i) => {
+                              const isSelected = templateSelections[r.role];
+                              return (
+                                <label key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-md)', padding: 'var(--space-md)', background: r.hired ? 'var(--bg-base)' : (isSelected ? 'var(--bg-elevated)' : 'transparent'), border: `1px solid ${r.hired ? 'var(--border-default)' : (isSelected ? 'var(--border-interactive)' : 'var(--border-subtle)')}`, borderRadius: 'var(--radius-md)', cursor: r.hired ? 'not-allowed' : 'pointer', opacity: r.hired ? 0.6 : 1, transition: 'all 0.2s' }}>
+                                  <input 
+                                    type="checkbox" 
+                                    checked={r.hired ? true : !!isSelected} 
+                                    disabled={r.hired}
+                                    onChange={(e) => {
+                                      if (!r.hired) {
+                                        setTemplateSelections(prev => {
+                                          const next = { ...prev };
+                                          if (e.target.checked) {
+                                            next[r.role] = { role: r.role, soul: r.soul, engine: 'claude-local', model: '' };
+                                          } else {
+                                            delete next[r.role];
+                                          }
+                                          return next;
+                                        });
+                                      }
+                                    }}
+                                    style={{ margin: '4px 0 0 0', width: '16px', height: '16px', flexShrink: 0, outline: 'none', border: 'none', boxShadow: 'none', cursor: 'pointer' }}
+                                  />
+                                  <div style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+                                      <div style={{ wordBreak: 'break-word', lineHeight: 1.2, display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                        <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 14 }}>{r.role}</div>
+                                        {r.cn && r.cn !== r.role.toLowerCase().replace(/-/g, '') && (
+                                          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.cn}</div>
+                                        )}
+                                      </div>
+                                      <button 
+                                        type="button"
+                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setInspectingAgent(r); }}
+                                        className="btn-outline" 
+                                        style={{ fontSize: 11, padding: '2px 8px', border: '1px solid var(--border-interactive)', borderRadius: '4px', flexShrink: 0 }}
+                                      >
+                                        Inspect
+                                      </button>
+                                    </div>
+                                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                                      {r.soul ? r.soul.substring(0, 100) + '...' : 'Base configuration identity.'}
+                                    </div>
+                                    {r.hired && <div style={{ fontSize: 10, color: 'var(--status-ok)', fontWeight: 600, marginTop: 6, textTransform: 'uppercase' }}>✓ Active Node</div>}
                                   </div>
-                                  {r.hired && <div style={{ fontSize: 10, color: 'var(--status-ok)', fontWeight: 600, marginTop: 6, textTransform: 'uppercase' }}>✓ Active Node</div>}
-                                </div>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      )}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
                     </div>
 
-                    <div style={{ marginTop: 'var(--space-2xl)', paddingTop: 'var(--space-xl)', borderTop: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 'var(--space-md)' }}>
+                    <div style={{ marginTop: 'var(--space-2xl)', paddingTop: 'var(--space-xl)', borderTop: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-md)' }}>
                       <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                        {suggestedRoles.filter(r => !r.hired && templateSelections[r.role]).length} agents selected
+                        <strong style={{ color: 'var(--text-primary)' }}>{Object.keys(templateSelections).length}</strong> agents drafted globally
+                        {Object.keys(templateSelections).length > 0 && (
+                          <button onClick={() => setTemplateSelections({})} className="btn-outline" style={{ border: 'none', padding: '0 8px', fontSize: 12, marginLeft: 'var(--space-sm)' }}>[Clear All]</button>
+                        )}
                       </span>
                       <button 
-                        onClick={handleBulkDeploy} 
-                        disabled={loading || suggestedRoles.filter(r => !r.hired && templateSelections[r.role]).length === 0} 
+                        onClick={() => { setShowTemplateModal(false); setShowCheckoutModal(true); }} 
+                        disabled={Object.keys(templateSelections).length === 0} 
                         className="btn-primary" 
                         style={{ padding: '8px 24px', fontSize: 14 }}
                       >
-                        {loading ? 'Deploying network...' : 'Deploy Selected Agents'}
+                        Review Draft Checkout →
                       </button>
                     </div>
                   </>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCheckoutModal && (
+        <div className="log-modal__overlay" onClick={() => setShowCheckoutModal(false)} style={{ zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="glass-panel" onClick={e => e.stopPropagation()} style={{ width: '85%', maxWidth: '1600px', maxHeight: '85vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)', border: '1px solid var(--border-interactive)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}>
+            <div style={{ padding: 'var(--space-lg) var(--space-xl)', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-elevated)' }}>
+              <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                Deployment Checkout ({Object.keys(templateSelections).length} Agents)
+              </h2>
+              <button className="btn-outline" onClick={() => setShowCheckoutModal(false)} style={{ padding: '4px 12px' }}>✕ Edit Draft</button>
+            </div>
+            
+            <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-xl)' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-md)' }}>
+                {Object.values(templateSelections).map((r) => (
+                  <div key={r.role} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 'var(--space-md) var(--space-lg)', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600, fontSize: 15, color: 'var(--text-primary)' }}>{r.role}</div>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>{r.soul ? r.soul.substring(0, 120) + '...' : 'Base configuration identity'}</div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-md)' }}>
+                      <select 
+                        value={r.engine} 
+                        onChange={(e) => setTemplateSelections(prev => ({ ...prev, [r.role]: { ...r, engine: e.target.value } }))}
+                        style={{ padding: '6px 12px', fontSize: 13, borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-interactive)', background: 'var(--bg-base)', outline: 'none', width: 'auto' }}
+                      >
+                        {adapters.map(a => <option key={a} value={a}>{a}</option>)}
+                      </select>
+                      <select 
+                        value={r.model} 
+                        onChange={(e) => setTemplateSelections(prev => ({ ...prev, [r.role]: { ...r, model: e.target.value } }))}
+                        style={{ padding: '6px 12px', fontSize: 13, borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-interactive)', background: 'var(--bg-base)', outline: 'none', width: 'auto' }}
+                      >
+                        <option value="">auto (Default)</option>
+                        <option value="claude-sonnet-4-20250514">claude-sonnet-4</option>
+                        <option value="claude-opus-4-20250514">claude-opus-4</option>
+                        <option value="gpt-5.4">gpt-5.4</option>
+                        <option value="o3">o3</option>
+                        <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                      </select>
+                      <button onClick={() => setTemplateSelections(prev => { const n = {...prev}; delete n[r.role]; return n; })} className="btn-outline" style={{ border: 'none', color: 'var(--text-muted)', padding: '4px 8px' }}>✕</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ padding: 'var(--space-xl)', borderTop: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'flex-end', background: 'var(--bg-base)' }}>
+              <button 
+                onClick={handleBulkDeploy} 
+                disabled={loading || Object.keys(templateSelections).length === 0} 
+                className="btn-primary" 
+                style={{ padding: '10px 28px', fontSize: 15 }}
+              >
+                {loading ? 'Igniting Engines...' : `Commit & Deploy ${Object.keys(templateSelections).length} Agents`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Inspect Agent Soul Modal */}
+      {inspectingAgent && (
+        <div className="log-modal__overlay" onClick={() => setInspectingAgent(null)} style={{ zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="glass-panel" onClick={e => e.stopPropagation()} style={{ width: '800px', maxHeight: '80vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-surface)', border: '1px solid var(--border-interactive)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }}>
+            <div style={{ padding: 'var(--space-lg) var(--space-xl)', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-elevated)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-md)' }}>
+                <span style={{ fontSize: 24 }}>🔍</span>
+                <div>
+                  <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)' }}>Identity Profile</h2>
+                  <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{inspectingAgent.role}</div>
+                </div>
+              </div>
+              <button className="btn-outline" onClick={() => setInspectingAgent(null)} style={{ padding: '4px 12px' }}>✕ Close</button>
+            </div>
+            
+            <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-xl)', background: 'var(--bg-base)' }}>
+              <h3 style={{ fontSize: 14, color: 'var(--text-primary)', marginBottom: 'var(--space-md)', textTransform: 'uppercase', letterSpacing: 1 }}>System Prompt / Soul</h3>
+              <pre style={{ 
+                whiteSpace: 'pre-wrap', 
+                wordWrap: 'break-word', 
+                fontFamily: 'monospace', 
+                fontSize: 13, 
+                lineHeight: 1.6, 
+                color: 'var(--text-secondary)',
+                background: 'var(--bg-surface)',
+                border: '1px solid var(--border-subtle)',
+                padding: 'var(--space-lg)',
+                borderRadius: 'var(--radius-md)'
+              }}>
+                {inspectingAgent.soul || 'No soul instructions defined.'}
+              </pre>
             </div>
           </div>
         </div>
