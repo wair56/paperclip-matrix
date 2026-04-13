@@ -83,6 +83,13 @@ export async function POST(req) {
        adapterConfig.url = `http://${nodeSettings.frp.serverAddr}:${nodeSettings.frp.remotePort}/api/webhook/paperclip`;
     }
 
+    // Edge case: OpenCode strictly requires a provider/model formatted string in adapterConfig
+    if (remoteAdapterType === "opencode_local" && !adapterConfig.model) {
+      adapterConfig.model = "openai/gpt-5.4";
+    } else if (remoteAdapterType === "opencode_local" && !adapterConfig.model.includes('/')) {
+      adapterConfig.model = `openai/${adapterConfig.model}`;
+    }
+
     const createRes = await fetch(`${url}/api/companies/${companyId}/agents`, {
       method: "POST",
       headers: { "Authorization": `Bearer ${boardKey}`, "Content-Type": "application/json" },
@@ -94,7 +101,10 @@ export async function POST(req) {
       })
     });
 
-    if (!createRes.ok) throw new Error(`Agent creation failed HTTP ${createRes.status}`);
+    if (!createRes.ok) {
+      const errText = await createRes.text();
+      throw new Error(`Agent create rejected HTTP ${createRes.status}: ${errText}`);
+    }
     const agent = await createRes.json();
 
     const keyRes = await fetch(`${url}/api/agents/${agent.id}/keys`, {
@@ -103,7 +113,10 @@ export async function POST(req) {
       body: JSON.stringify({ name: "matrix-auto-key" })
     });
 
-    if (!keyRes.ok) throw new Error(`Key creation failed HTTP ${keyRes.status}`);
+    if (!keyRes.ok) {
+      const errText = await keyRes.text();
+      throw new Error(`Key creation rejected HTTP ${keyRes.status}: ${errText}`);
+    }
     const keyData = await keyRes.json();
     const apiKey = keyData.key || keyData.apiKey || keyData.plaintextKey || keyData.token;
 

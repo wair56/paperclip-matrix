@@ -35,7 +35,12 @@ export default function Dashboard() {
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [availableTemplates, setAvailableTemplates] = useState([]);
   const [remoteAgents, setRemoteAgents] = useState([]);
-  const [adapters, setAdapters] = useState(['claude-local', 'codex-local', 'gemini-local']);
+  const [adapters, setAdapters] = useState([]);
+  const [allAdapters, setAllAdapters] = useState([]);
+  const [showToolbox, setShowToolbox] = useState(false);
+  const [adapterStatuses, setAdapterStatuses] = useState({});
+  const [loadingStatus, setLoadingStatus] = useState({});
+  const [installingAdapter, setInstallingAdapter] = useState({});
   
   // Modal states
   const [templateSearch, setTemplateSearch] = useState('');
@@ -118,7 +123,8 @@ export default function Dashboard() {
         const data = await res.json();
         if (data.success && data.adapters) {
           setAdapters(data.adapters);
-          if (!data.adapters.includes(executor)) {
+          if (data.allAdapters) setAllAdapters(data.allAdapters);
+          if (data.adapters.length > 0 && !data.adapters.includes(executor)) {
             setExecutor(data.adapters[0]);
           }
         }
@@ -452,6 +458,21 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-md">
           <button 
+            onClick={() => setShowToolbox(!showToolbox)} 
+            className={`btn-outline flex items-center ${showToolbox ? 'active' : ''}`} 
+            style={{ gap: 'var(--space-sm)', background: showToolbox ? 'var(--bg-elevated)' : 'transparent', position: 'relative' }}
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+            </svg>
+            CLI Toolbox
+            {allAdapters.length > 0 && (() => {
+              const installed = allAdapters.filter(a => a.installed).length;
+              const total = allAdapters.filter(a => a.cli !== null).length;
+              return <span style={{ fontSize: 10, fontWeight: 600, marginLeft: 4, padding: '1px 6px', borderRadius: 'var(--radius-pill)', background: installed === total ? 'var(--status-ok)' : 'var(--accent-muted)', color: installed === total ? 'var(--bg-base)' : 'var(--accent)' }}>{installed}/{total}</span>;
+            })()}
+          </button>
+          <button 
             onClick={() => setShowSettings(!showSettings)} 
             className={`btn-outline flex items-center ${showSettings ? 'active' : ''}`} 
             style={{ gap: 'var(--space-sm)', background: showSettings ? 'var(--bg-elevated)' : 'transparent', position: 'relative' }}
@@ -490,6 +511,274 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* ── CLI Toolbox ── */}
+      {showToolbox && allAdapters.length > 0 && (() => {
+        const fetchStatus = async (adapterName) => {
+          setLoadingStatus(prev => ({ ...prev, [adapterName]: true }));
+          try {
+            const res = await fetch('/api/adapters/status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ adapter: adapterName }),
+            });
+            const data = await res.json();
+            if (data.success) {
+              setAdapterStatuses(prev => ({ ...prev, [adapterName]: data }));
+            } else {
+              showToast(`Status query failed: ${data.error}`, true);
+            }
+          } catch (e) { showToast('Status query error: ' + e.message, true); }
+          setLoadingStatus(prev => ({ ...prev, [adapterName]: false }));
+        };
+
+        const fetchAllStatuses = async () => {
+          const installed = allAdapters.filter(a => a.installed);
+          for (const a of installed) {
+            fetchStatus(a.name);
+          }
+        };
+
+        return (
+        <section className="glass-panel" style={{ padding: 'var(--space-xl)', marginBottom: 'var(--space-xl)', borderLeft: '3px solid var(--accent)' }}>
+          <div className="flex items-center justify-between" style={{ marginBottom: 'var(--space-lg)' }}>
+            <h2 style={{ fontSize: 16, margin: 0, display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
+              🧰 CLI Toolbox
+              <span style={{ fontSize: 11, background: 'var(--accent-muted)', color: 'var(--accent)', padding: '2px 8px', borderRadius: 'var(--radius-lg)' }}>
+                {allAdapters.filter(a => a.installed).length} / {allAdapters.filter(a => a.cli !== null).length} installed
+              </span>
+            </h2>
+            <div className="flex gap-sm">
+              <button className="btn-outline" style={{ fontSize: 12, padding: '4px 12px' }} onClick={fetchAllStatuses}>
+                🔍 Status All
+              </button>
+              <button className="btn-outline" style={{ fontSize: 12, padding: '4px 12px' }} onClick={async () => {
+                try {
+                  const res = await fetch('/api/adapters');
+                  const data = await res.json();
+                  if (data.success) {
+                    setAdapters(data.adapters);
+                    if (data.allAdapters) setAllAdapters(data.allAdapters);
+                    setAdapterStatuses({});
+                    showToast('CLI detection refreshed', false);
+                  }
+                } catch (e) { showToast('Refresh failed', true); }
+              }}>⟳ Re-detect</button>
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: 'var(--space-md)' }}>
+            {allAdapters.map(a => {
+              const st = adapterStatuses[a.name];
+              const isLoading = loadingStatus[a.name];
+              return (
+              <div key={a.name} style={{
+                background: 'var(--bg-elevated)',
+                border: `1px solid ${a.installed ? 'var(--status-ok)' : 'var(--border-subtle)'}`,
+                borderRadius: 'var(--radius-lg)',
+                padding: 'var(--space-lg)',
+                opacity: a.installed ? 1 : 0.7,
+                transition: 'border-color 0.2s, opacity 0.2s',
+              }}>
+                {/* Header row */}
+                <div className="flex items-center justify-between" style={{ marginBottom: 'var(--space-sm)' }}>
+                  <div className="flex items-center gap-sm">
+                    <span style={{
+                      width: 8, height: 8, borderRadius: 'var(--radius-pill)', flexShrink: 0,
+                      background: a.cli === null ? 'var(--accent-secondary)' : a.installed ? 'var(--status-ok)' : 'var(--status-err)',
+                      boxShadow: `0 0 6px ${a.cli === null ? 'var(--accent-secondary)' : a.installed ? 'var(--status-ok)' : 'var(--status-err)'}`,
+                    }}></span>
+                    <span style={{ fontSize: 14, fontWeight: 600 }}>{a.label}</span>
+                    <span style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--text-muted)' }}>{a.name}</span>
+                  </div>
+                  <div className="flex items-center gap-sm">
+                    <span style={{
+                      fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 'var(--radius-sm)', textTransform: 'uppercase', letterSpacing: '0.5px',
+                      background: a.cli === null ? 'var(--accent-secondary-muted)' : a.installed ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)',
+                      color: a.cli === null ? 'var(--accent-secondary)' : a.installed ? 'var(--status-ok)' : 'var(--status-err)',
+                    }}>
+                      {a.cli === null ? 'Gateway' : a.installed ? '✓ Ready' : '✗ Missing'}
+                    </span>
+                    {a.installed && a.cli && (
+                      <button
+                        className="btn-outline"
+                        style={{ fontSize: 10, padding: '2px 8px', opacity: isLoading ? 0.5 : 1 }}
+                        disabled={isLoading}
+                        onClick={() => fetchStatus(a.name)}
+                      >
+                        {isLoading ? '⏳' : '🔍 Status'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Version */}
+                {(a.version || st?.version) && (
+                  <div style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--text-muted)', marginBottom: 'var(--space-xs)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    v{st?.version || a.version}
+                  </div>
+                )}
+
+                {/* Current model + Auth — shown after status query */}
+                {st && (
+                  <div style={{ marginTop: 'var(--space-xs)', marginBottom: 'var(--space-sm)', padding: 'var(--space-sm) var(--space-md)', background: 'var(--bg-base)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-default)' }}>
+                    {/* Current model */}
+                    <div className="flex items-center gap-sm" style={{ marginBottom: st.auth ? 'var(--space-xs)' : 0 }}>
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 70 }}>Model:</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)', fontFamily: 'monospace' }}>
+                        {st.currentModel || '—'}
+                      </span>
+                    </div>
+                    {/* Provider */}
+                    {st.currentProvider && (
+                      <div className="flex items-center gap-sm" style={{ marginBottom: 'var(--space-xs)' }}>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 70 }}>Provider:</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{st.currentProvider}</span>
+                      </div>
+                    )}
+                    {/* Auth */}
+                    {st.auth && (
+                      <div className="flex items-center gap-sm">
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 70 }}>Auth:</span>
+                        <span style={{
+                          fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-sm)',
+                          background: st.auth.authenticated ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)',
+                          color: st.auth.authenticated ? 'var(--status-ok)' : 'var(--status-err)',
+                        }}>
+                          {st.auth.authenticated ? '✓' : '✗'}
+                        </span>
+                        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{st.auth.method}</span>
+                      </div>
+                    )}
+                    {/* API Keys breakdown for Hermes */}
+                    {st.auth?.apiKeys && Object.keys(st.auth.apiKeys).length > 0 && (
+                      <div style={{ marginTop: 'var(--space-xs)', display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                        {Object.entries(st.auth.apiKeys).map(([key, ok]) => (
+                          <span key={key} style={{
+                            fontSize: 9, padding: '1px 5px', borderRadius: 'var(--radius-sm)',
+                            border: `1px solid ${ok ? 'var(--status-ok)' : 'var(--border-subtle)'}`,
+                            color: ok ? 'var(--status-ok)' : 'var(--text-muted)',
+                            opacity: ok ? 1 : 0.5,
+                          }}>{key}</span>
+                        ))}
+                      </div>
+                    )}
+                    {/* Config extras */}
+                    {st.config && (
+                      <div style={{ marginTop: 'var(--space-xs)', borderTop: '1px solid var(--border-subtle)', paddingTop: 'var(--space-xs)' }}>
+                        {st.config.baseUrl && (
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            Base URL: {st.config.baseUrl}
+                          </div>
+                        )}
+                        {st.config.maxTurns && (
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Max turns: {st.config.maxTurns}</div>
+                        )}
+                        {st.config.authType && (
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Auth: {st.config.authType}</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Available models list */}
+                {st?.models && st.models.length > 0 && (
+                  <div style={{ marginBottom: 'var(--space-sm)' }}>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                      Available Models ({st.models.length})
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px' }}>
+                      {st.models.slice(0, 12).map(m => (
+                        <span key={m.id} style={{
+                          fontSize: 10, padding: '2px 6px', borderRadius: 'var(--radius-sm)',
+                          background: (st.currentModel === m.id) ? 'var(--accent-muted)' : 'var(--bg-base)',
+                          border: `1px solid ${(st.currentModel === m.id) ? 'var(--accent)' : 'var(--border-subtle)'}`,
+                          color: (st.currentModel === m.id) ? 'var(--accent)' : 'var(--text-secondary)',
+                          fontFamily: 'monospace',
+                        }}>{m.label || m.id}</span>
+                      ))}
+                      {st.models.length > 12 && (
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)', padding: '2px 4px' }}>+{st.models.length - 12} more</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Note */}
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 'var(--space-sm)' }}>{a.note}</div>
+
+                {/* Install command for missing CLIs */}
+                {a.installCmd && !a.installed && (
+                  <div style={{ marginBottom: 'var(--space-xs)' }}>
+                    <div style={{ display: 'flex', gap: 'var(--space-sm)', alignItems: 'center', marginBottom: 'var(--space-xs)' }}>
+                      <code style={{
+                        flex: 1, fontSize: 11, fontFamily: 'monospace', padding: '6px 10px', borderRadius: 'var(--radius-sm)',
+                        background: 'var(--bg-base)', border: '1px solid var(--border-default)', color: 'var(--accent)',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{a.installCmd}</code>
+                      <button className="btn-outline" style={{ fontSize: 11, padding: '4px 10px', flexShrink: 0 }} onClick={() => {
+                        navigator.clipboard.writeText(a.installCmd);
+                        showToast('Copied: ' + a.installCmd, false);
+                      }}>📋</button>
+                    </div>
+                    <div style={{ display: 'flex', gap: 'var(--space-sm)' }}>
+                      {a.installCmd && !a.installCmd.startsWith('Install ') && (
+                        <button
+                          className="btn-primary"
+                          style={{ fontSize: 11, padding: '5px 14px', flex: 1, opacity: installingAdapter[a.name] ? 0.6 : 1 }}
+                          disabled={installingAdapter[a.name]}
+                          onClick={async () => {
+                            setInstallingAdapter(prev => ({ ...prev, [a.name]: true }));
+                            showToast(`Installing ${a.label}...`, false);
+                            try {
+                              const res = await fetch('/api/adapters/install', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ adapter: a.name }),
+                              });
+                              const data = await res.json();
+                              if (data.success) {
+                                showToast(`✅ ${a.label} installed!`, false);
+                                // Refresh adapter detection
+                                const refreshRes = await fetch('/api/adapters');
+                                const refreshData = await refreshRes.json();
+                                if (refreshData.success) {
+                                  setAdapters(refreshData.adapters);
+                                  if (refreshData.allAdapters) setAllAdapters(refreshData.allAdapters);
+                                }
+                              } else {
+                                showToast(`❌ Install failed: ${data.error}`, true);
+                              }
+                            } catch (e) { showToast('Install error: ' + e.message, true); }
+                            setInstallingAdapter(prev => ({ ...prev, [a.name]: false }));
+                          }}
+                        >
+                          {installingAdapter[a.name] ? '⏳ Installing...' : '⬇️ Install Now'}
+                        </button>
+                      )}
+                      {a.installDoc && (
+                        <a
+                          href={a.installDoc}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn-outline"
+                          style={{ fontSize: 11, padding: '5px 14px', textDecoration: 'none', textAlign: 'center', flex: a.installCmd?.startsWith('Install ') ? 1 : 0 }}
+                        >📖 Docs</a>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {/* Docs link for installed CLIs */}
+                {a.installed && a.installDoc && (
+                  <a href={a.installDoc} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: 'var(--accent)', textDecoration: 'none', display: 'inline-block' }}>📖 Docs →</a>
+                )}
+              </div>
+              );
+            })}
+          </div>
+        </section>
+        );
+      })()}
 
       {/* ── Node Network Gateway ── */}
       {showSettings && (
@@ -599,7 +888,11 @@ export default function Dashboard() {
             <div className="flex flex-col gap-sm" style={{ marginBottom: (showAddCompany || companies.length === 0) ? 'var(--space-lg)' : 0 }}>
               {companies.length === 0 ? (
                 <div style={{ fontSize: 14, color: 'var(--text-muted)' }}>No organizations linked yet.</div>
-              ) : companies.map(c => {
+              ) : [...companies].sort((a, b) => {
+                if (a.status === 'archived' && b.status !== 'archived') return 1;
+                if (b.status === 'archived' && a.status !== 'archived') return -1;
+                return 0;
+              }).map(c => {
                 const isSelected = selectedCompanyId === c.id;
                 const isEditing = editingCompany && editingCompany.id === c.id;
                 const onDutyCount = identities.filter(id => id.companyId === c.id).length;
@@ -717,8 +1010,21 @@ export default function Dashboard() {
                       </div>
                       
                       <div>
-                        <label style={{ marginBottom: 'var(--space-xs)', display: 'block' }}>Role Alias</label>
-                        <input value={role} onChange={e => setRole(e.target.value)} required />
+                        <label style={{ marginBottom: 'var(--space-xs)', display: 'block' }}>Role Profile</label>
+                        <select value={role} onChange={e => setRole(e.target.value)} required>
+                          <option value="" disabled>Select a role...</option>
+                          <option value="ceo">CEO - Chief Executive</option>
+                          <option value="cto">CTO - Chief Technology</option>
+                          <option value="cmo">CMO - Chief Marketing</option>
+                          <option value="cfo">CFO - Chief Financial</option>
+                          <option value="engineer">Software Engineer</option>
+                          <option value="designer">Product Designer</option>
+                          <option value="pm">Product Manager</option>
+                          <option value="qa">QA Engineer</option>
+                          <option value="devops">DevOps Engineer</option>
+                          <option value="researcher">Researcher</option>
+                          <option value="general">General Assistant</option>
+                        </select>
                         {discoverError && (
                           <div style={{ marginTop: 8, fontSize: 11, color: 'var(--status-err)' }}>Error: {discoverError}</div>
                         )}

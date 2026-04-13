@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { SandboxManager } from '@/lib/SandboxManager';
 import { getNodeSettings } from '@/lib/nodeSettings';
+import getDb from '@/lib/db';
 import { appendFileSync } from 'fs';
 import path from 'path';
 import { LOGS_DIR } from '@/lib/paths';
@@ -21,6 +22,30 @@ export async function POST(req) {
 
     if (activeWorkers.has(role)) {
       return NextResponse.json({ success: false, error: `Worker ${role} is already running.` }, { status: 409 });
+    }
+
+    // 0. Securely pull latest Identity keys/variables from the Cloud before Sandboxing
+    const db = getDb();
+    const identity = db.prepare(`SELECT agentId, apiUrl, companyId FROM identities WHERE role = ? AND status = 'active'`).get(role);
+    if (identity && identity.agentId && identity.companyId) {
+      const company = db.prepare(`SELECT boardKey FROM companies WHERE id = ?`).get(identity.companyId);
+      if (company && company.boardKey) {
+        try {
+          const fetchRes = await fetch(`${identity.apiUrl}/api/agents/${identity.agentId}`, {
+            headers: { "Authorization": `Bearer ${company.boardKey}` }
+          });
+          if (fetchRes.ok) {
+            const data = await fetchRes.json();
+            const cloudAgent = data.data || data.agent || data;
+            if (cloudAgent.runtimeConfig && Object.keys(cloudAgent.runtimeConfig).length > 0) {
+              db.prepare(`UPDATE identities SET envJson = ? WHERE role = ?`).run(JSON.stringify(cloudAgent.runtimeConfig), role);
+              console.log(`[Matrix-Orchestrator] Successfully pulled latest secure API keys for agent ${role} from Cloud.`);
+            }
+          }
+        } catch (e) {
+          console.warn(`[Matrix-Orchestrator] Failed to pull latest secure keys from cloud during ignite: ${e.message}`);
+        }
+      }
     }
 
     // 1. Obtain the securely isolated Sandbox Payload
@@ -58,14 +83,24 @@ export async function POST(req) {
         patchPayload.adapterConfig = adapterConfig;
       }
       
-      fetch(`${payload.env.PAPERCLIP_API_URL}/api/agents/${payload.env.PAPERCLIP_AGENT_ID}`, {
-        method: "PATCH",
-        headers: { 
-          "Authorization": `Bearer ${payload.env.PAPERCLIP_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(patchPayload)
-      }).catch(err => console.error(`[Matrix-Orchestrator] Auto-heal sync failed for ${role}:`, err));
+      try {
+        const patchRes = await fetch(`${payload.env.PAPERCLIP_API_URL}/api/agents/${payload.env.PAPERCLIP_AGENT_ID}`, {
+          method: "PATCH",
+          headers: { 
+            "Authorization": `Bearer ${payload.env.PAPERCLIP_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(patchPayload)
+        });
+        if (!patchRes.ok) {
+          const errText = await patchRes.text();
+          console.error(`[Matrix-Orchestrator] Cloud sync failed [${patchRes.status}]:`, errText);
+          return NextResponse.json({ success: false, error: `Cloud sync rejected the adapter update: ${patchRes.status} - ${errText}` }, { status: 502 });
+        }
+      } catch (err) {
+        console.error(`[Matrix-Orchestrator] Auto-heal sync network error for ${role}:`, err);
+        return NextResponse.json({ success: false, error: `Could not reach ${payload.env.PAPERCLIP_API_URL} to ignite agent: ${err.message}` }, { status: 502 });
+      }
     }
 
     // Open log file stream to capture output

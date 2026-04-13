@@ -77,7 +77,11 @@ export async function POST(req) {
           for (const ra of remoteAgents) {
             if (!localSet.has(ra.id)) {
               // Exists natively on Cloud, but completely missing locally! Auto-provision it.
-              const safeRole = (ra.role || 'orphan').replace(/[^a-zA-Z0-9_-]/g, '') + `_${ra.id.substring(0, 5)}`;
+              let safeRole = (ra.role || 'orphan').replace(/[^a-zA-Z0-9_-]/g, '');
+              const existingRole = db.prepare(`SELECT role FROM identities WHERE role = ?`).get(safeRole);
+              if (existingRole) {
+                safeRole = `${safeRole}_${ra.id.substring(0, 5)}`;
+              }
               const adapterType = ra.adapterType === 'http' ? 'claude-local' : (ra.adapterType || 'claude-local');
               
               db.prepare(`

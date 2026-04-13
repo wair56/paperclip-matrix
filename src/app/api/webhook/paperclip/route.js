@@ -72,6 +72,12 @@ export async function POST(req) {
     const body = JSON.parse(rawBody);
     const { runId, agentId, companyId, context } = body;
     console.log(`[Matrix-Webhook] Incoming run payload for Agent ${agentId} (Run: ${runId})`);
+    
+    // Dump the payload for debugging keys
+    require('fs').appendFileSync(
+      path.join(LOGS_DIR, 'webhook-debug.log'), 
+      `\n[${new Date().toISOString()}] PAYLOAD:\n${JSON.stringify(body, null, 2)}\n`
+    );
 
     // 1. Locate the correct local identity mapping
     const db = getDb();
@@ -111,7 +117,16 @@ export async function POST(req) {
     }
 
     // 4. Build CLI args
-    const prompt = `You are agent ${agentId} (${roleName}). Continue your Paperclip work.`;
+    const systemPrompt = body.instructions || body.systemPrompt || '';
+    const taskContext = typeof context === 'string' ? context : JSON.stringify(context || '');
+    
+    let prompt = `You are agent ${agentId} (${roleName}). Continue your Paperclip work.\n`;
+    if (systemPrompt) {
+      prompt += `\n[YOUR IDENTITY & INSTRUCTIONS]\n${systemPrompt}\n\n`;
+    }
+    if (taskContext && taskContext !== '""') {
+      prompt += `[CURRENT TASK CONTEXT]\n${taskContext}\n`;
+    }
     let args = [];
 
     const baseCmd = sandbox.executorName.split('-')[0];
@@ -137,6 +152,9 @@ export async function POST(req) {
     } else if (baseCmd === 'openclaw') {
       args = ['agent', '--message', prompt, '--json'];
       // Model/Skip permissions are ignored logically or managed in conf
+    } else if (baseCmd === 'hermes') {
+      args = ['chat', '--quiet', '--yolo', '-q', prompt];
+      if (modelArg) args.push('--model', modelArg);
     } else {
       // For any generic runners, pass standard model args
       if (modelArg) args.push('--model', modelArg);
@@ -151,7 +169,7 @@ export async function POST(req) {
       const prefix = `[${timestamp}] [${streamType.toUpperCase()}] `;
       const formatted = chunk.split('\n').map(line => prefix + line).join('\n') + '\n';
       logStream.write(formatted);
-      process.stdout.write(chunk);
+      if (process.env.DEBUG) console.log(`[Matrix-Webhook] ${streamType}: ${chunk.length} bytes`);
     };
 
     logToFile('stdout', `[Matrix-Webhook] Dispatching: ${sandbox.resolvedBinary} ${args.join(' ')}\n`);
