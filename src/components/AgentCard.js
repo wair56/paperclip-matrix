@@ -163,6 +163,7 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
                 {isRunning ? '⚡ Running' : 'Ignite'}
               </button>
               <button className="btn-outline" onClick={onTerminate} disabled={!isRunning} style={!isRunning ? { opacity: 0.4, cursor: 'not-allowed' } : {}}>Stop</button>
+              <button className="btn-outline" onClick={(e) => { e.stopPropagation(); onViewLogs(id.role); }}>Logs</button>
             </>
           ) : (
              <span style={{ fontSize: 13, color: 'var(--text-muted)', border: '1px solid var(--border-subtle)', padding: '2px 10px', borderRadius: 'var(--radius-sm)' }}>♻️ Retired</span>

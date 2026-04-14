@@ -81,7 +81,7 @@ export async function POST(req) {
 
     // 1. Locate the correct local identity mapping
     const db = getDb();
-    const identity = db.prepare(`SELECT role, envJson FROM identities WHERE agentId = ? AND status = 'active'`).get(agentId);
+    const identity = db.prepare(`SELECT role, envJson, companyId FROM identities WHERE agentId = ? AND status = 'active'`).get(agentId);
 
     if (!identity) {
       console.error(`[Matrix-Webhook] Agent ${agentId} not found in local vault.`);
@@ -174,6 +174,14 @@ export async function POST(req) {
 
     logToFile('stdout', `[Matrix-Webhook] Dispatching: ${sandbox.resolvedBinary} ${args.join(' ')}\n`);
 
+    const receivedAt = Date.now();
+    const dbRunId = runId || `local-${receivedAt}`;
+    const resolvedCompanyId = companyId || identity.companyId;
+    try {
+      db.prepare(`INSERT INTO task_runs (id, runId, companyId, agentId, role, prompt, receivedAt, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'running')`)
+        .run(`${Date.now()}-${Math.random().toString(36).substring(2,9)}`, dbRunId, resolvedCompanyId, agentId, roleName, prompt, receivedAt);
+    } catch(e) { console.error('[Matrix-Webhook] Failed to insert task_run:', e); }
+
     // 6. Execute in sandbox explicitly via Spawn to capture stream descriptors natively
     const proc = spawn(sandbox.resolvedBinary, args, {
       cwd: sandbox.cwd,
@@ -188,12 +196,23 @@ export async function POST(req) {
 
     // 7. Establish high-bandwidth HTTP reverse pipeline directly returning to the Cloud Webhook initiator
     const encoder = new TextEncoder();
+    let fullResponse = '';
     const stream = new ReadableStream({
       start(controller) {
         proc.stdout.on('data', (chunk) => {
-          logToFile('stdout', chunk.toString());
-          // Directly pass real-time JSONL payload native formats (tool calls, reasoning, etc) up to cloud
-          controller.enqueue(chunk); 
+          const text = chunk.toString();
+          fullResponse += text;
+          logToFile('stdout', text);
+          
+          if (baseCmd === 'hermes' || baseCmd === 'openclaw') {
+            // Hermes and OpenClaw may output raw text or unformatted streams, wrap it to prevent cloud parsing crash
+            // (Assuming text arrives chunked, we wrap each chunk)
+            const payload = { type: 'text', text: text };
+            controller.enqueue(encoder.encode(JSON.stringify(payload) + '\n'));
+          } else {
+            // Directly pass real-time JSONL payload native formats (tool calls, reasoning, etc) up to cloud
+            controller.enqueue(chunk); 
+          }
         });
 
         proc.stderr.on('data', (chunk) => {
@@ -205,6 +224,11 @@ export async function POST(req) {
         });
 
         proc.on('close', (code, signal) => {
+          try {
+             db.prepare(`UPDATE task_runs SET response = ?, repliedAt = ?, status = ? WHERE runId = ?`)
+               .run(fullResponse, Date.now(), code === 0 ? 'completed' : 'error', dbRunId);
+          } catch(e) { console.error('[Matrix-Webhook] Failed to update task_runs:', e); }
+
           logToFile('stdout', `\n[Matrix-Webhook] Completed with exit code ${code}\n`);
           if (code !== 0) {
             const finalPayload = { type: 'error', message: `Process exited with code ${code}` };

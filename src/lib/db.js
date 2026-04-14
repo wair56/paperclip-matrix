@@ -58,6 +58,19 @@ export function getDb() {
       envJson TEXT,
       status TEXT DEFAULT 'active'
     );
+
+    CREATE TABLE IF NOT EXISTS task_runs (
+      id TEXT PRIMARY KEY,
+      runId TEXT,
+      companyId TEXT,
+      agentId TEXT,
+      role TEXT,
+      prompt TEXT,
+      response TEXT,
+      receivedAt INTEGER,
+      repliedAt INTEGER,
+      status TEXT
+    );
   `);
 
   // Safe migration for existing DBs

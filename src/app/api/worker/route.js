@@ -26,7 +26,7 @@ export async function POST(req) {
 
     // 0. Securely pull latest Identity keys/variables from the Cloud before Sandboxing
     const db = getDb();
-    const identity = db.prepare(`SELECT name, agentId, apiUrl, companyId FROM identities WHERE role = ? AND status = 'active'`).get(role);
+    const identity = db.prepare(`SELECT name, agentId, apiUrl, companyId, envJson FROM identities WHERE role = ? AND status = 'active'`).get(role);
     if (identity && identity.agentId && identity.companyId) {
       const company = db.prepare(`SELECT boardKey FROM companies WHERE id = ?`).get(identity.companyId);
       if (company && company.boardKey) {
@@ -37,9 +37,13 @@ export async function POST(req) {
           if (fetchRes.ok) {
             const data = await fetchRes.json();
             const cloudAgent = data.data || data.agent || data;
-            if (cloudAgent.runtimeConfig && Object.keys(cloudAgent.runtimeConfig).length > 0) {
-              db.prepare(`UPDATE identities SET envJson = ? WHERE role = ?`).run(JSON.stringify(cloudAgent.runtimeConfig), role);
-              console.log(`[Matrix-Orchestrator] Successfully pulled latest secure API keys for agent ${role} from Cloud.`);
+            if (cloudAgent) {
+              const envPayload = (cloudAgent.runtimeConfig && Object.keys(cloudAgent.runtimeConfig).length > 0)
+                ? JSON.stringify(cloudAgent.runtimeConfig)
+                : identity.envJson || null;
+              db.prepare(`UPDATE identities SET envJson = ?, name = ? WHERE role = ?`)
+                .run(envPayload, cloudAgent.name || identity.name, role);
+              console.log(`[Matrix-Orchestrator] Pulled latest secure API keys & name for agent ${role} from Cloud.`);
             }
           }
         } catch (e) {
@@ -81,9 +85,6 @@ export async function POST(req) {
       const patchPayload = { adapterType: mappedAdapterType };
       if (Object.keys(adapterConfig).length > 0) {
         patchPayload.adapterConfig = adapterConfig;
-      }
-      if (identity && identity.name) {
-        patchPayload.name = identity.name;
       }
       
       try {

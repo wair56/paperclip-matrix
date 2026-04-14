@@ -17,6 +17,7 @@ export async function GET() {
     const mapRow = (row) => ({
       filename: `${row.role}.conf`, // backward compatibility
       role: row.role,
+      name: row.name || '',
       agentId: row.agentId || '',
       apiUrl: row.apiUrl || '',
       companyId: row.companyId || '',

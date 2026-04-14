@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import AgentCard from '@/components/AgentCard';
 import LogViewer from '@/components/LogViewer';
 import TelemetryGauge from '@/components/TelemetryGauge';
+import GlobalRunViewer from '@/components/GlobalRunViewer';
 
 export default function Dashboard() {
   const [identities, setIdentities] = useState([]);
@@ -12,6 +13,7 @@ export default function Dashboard() {
   const [obliteratingWorkers, setObliteratingWorkers] = useState(new Set());
   const [liveRuns, setLiveRuns] = useState({});
   const [viewingLogsFor, setViewingLogsFor] = useState(null);
+  const [showGlobalRuns, setShowGlobalRuns] = useState(false);
   const [showAddCompany, setShowAddCompany] = useState(false);
 
   const [loading, setLoading] = useState(false);
@@ -469,6 +471,14 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-md">
           <button 
+            onClick={() => setShowGlobalRuns(!showGlobalRuns)} 
+            className={`btn-outline flex items-center ${showGlobalRuns ? 'active' : ''}`} 
+            style={{ gap: 'var(--space-sm)', background: showGlobalRuns ? 'var(--bg-elevated)' : 'transparent', position: 'relative' }}
+          >
+            📋 Tasks History
+          </button>
+          
+          <button 
             onClick={() => setShowToolbox(!showToolbox)} 
             className={`btn-outline flex items-center ${showToolbox ? 'active' : ''}`} 
             style={{ gap: 'var(--space-sm)', background: showToolbox ? 'var(--bg-elevated)' : 'transparent', position: 'relative' }}
@@ -521,6 +531,13 @@ export default function Dashboard() {
             <div>{sysinfo.platform} · uptime {Math.floor(sysinfo.uptimeSec / 3600)}h</div>
           </div>
         </div>
+      )}
+
+      {/* ── Global Tasks History ── */}
+      {showGlobalRuns && (
+        <section className="glass-panel" style={{ marginBottom: 'var(--space-xl)', overflow: 'hidden' }}>
+          <GlobalRunViewer />
+        </section>
       )}
 
       {/* ── CLI Toolbox ── */}
