@@ -41,7 +41,7 @@ export async function GET() {
 export async function POST(req) {
   try {
     const body = await req.json();
-    const { companyId, roleName, executor, model, initialSoul } = body;
+    const { companyId, roleName, name, executor, model, initialSoul } = body;
 
     if (!companyId || !roleName) {
       return NextResponse.json({ success: false, error: "Missing required fields (companyId, roleName) for Auto-Join." }, { status: 400 });
@@ -94,7 +94,7 @@ export async function POST(req) {
       method: "POST",
       headers: { "Authorization": `Bearer ${boardKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: `Matrix Node ${roleName} (${os.hostname()})`,
+        name: name || `Matrix Node ${roleName} (${os.hostname()})`,
         role: roleName,
         adapterType: remoteAdapterType,
         adapterConfig
@@ -129,7 +129,7 @@ export async function POST(req) {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     `).run(
       roleName,
-      `Matrix Node ${roleName}`,
+      name || `Matrix Node ${roleName} (${os.hostname()})`,
       agent.id,
       url,
       companyId,

@@ -28,6 +28,7 @@ export default function Dashboard() {
   const [showSettings, setShowSettings] = useState(false);
 
   const [role, setRole] = useState('manager');
+  const [agentName, setAgentName] = useState('');
   const [executor, setExecutor] = useState('claude-local');
   const [newModel, setNewModel] = useState('');
   const [showProvisionForm, setShowProvisionForm] = useState(false);
@@ -241,7 +242,7 @@ export default function Dashboard() {
       const res = await fetch('/api/identity', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ companyId: selectedCompanyId, roleName: role, executor, model: newModel, initialSoul: pendingSoul })
+        body: JSON.stringify({ companyId: selectedCompanyId, roleName: role, name: agentName, executor, model: newModel, initialSoul: pendingSoul })
       });
       const data = await res.json();
       if (data.success) {
@@ -1038,6 +1039,17 @@ export default function Dashboard() {
                         {discoverError && (
                           <div style={{ marginTop: 8, fontSize: 11, color: 'var(--status-err)' }}>Error: {discoverError}</div>
                         )}
+                      </div>
+                      
+                      <div>
+                        <label style={{ marginBottom: 'var(--space-xs)', display: 'block', color: 'var(--text-muted)' }}>Alias Name (Optional)</label>
+                        <input 
+                          type="text"
+                          className="w-full bg-input"
+                          placeholder={`E.g., "AI ${role.charAt(0).toUpperCase() + role.slice(1)}"`}
+                          value={agentName}
+                          onChange={e => setAgentName(e.target.value)}
+                        />
                       </div>
                       <div>
                         <label>Adapter Engine</label>
