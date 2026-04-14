@@ -176,6 +176,19 @@ export async function PATCH(req) {
       role
     );
 
+    // Active Cloud Sync for dynamic properties like Name
+    if (name && existing.companyId && existing.agentId) {
+      const company = db.prepare(`SELECT boardKey FROM companies WHERE id = ?`).get(existing.companyId);
+      if (company && company.boardKey) {
+        // Fire and forget; do not block response
+        fetch(`${existing.apiUrl}/api/agents/${existing.agentId}`, {
+          method: "PATCH",
+          headers: { "Authorization": `Bearer ${company.boardKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ name })
+        }).catch(e => console.error(`[Matrix-API] Failed to actively sync name change to Cloud:`, e));
+      }
+    }
+
     return NextResponse.json({ success: true, message: `Updated ${role}` });
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
