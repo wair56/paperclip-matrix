@@ -86,10 +86,11 @@ export async function POST(req) {
               
               db.prepare(`
                 INSERT OR REPLACE INTO identities 
-                (role, agentId, apiUrl, companyId, executor, timeoutMs, apiKey, status) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+                (role, name, agentId, apiUrl, companyId, executor, timeoutMs, apiKey, status) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
               `).run(
                 safeRole,
+                ra.name || null,
                 ra.id,
                 company.apiUrl,
                 company.id,

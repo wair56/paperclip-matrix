@@ -47,6 +47,7 @@ export function getDb() {
 
     CREATE TABLE IF NOT EXISTS identities (
       role TEXT PRIMARY KEY,
+      name TEXT,
       agentId TEXT,
       apiUrl TEXT,
       companyId TEXT,
@@ -58,6 +59,13 @@ export function getDb() {
       status TEXT DEFAULT 'active'
     );
   `);
+
+  // Safe migration for existing DBs
+  try {
+    db.exec(`ALTER TABLE identities ADD COLUMN name TEXT;`);
+  } catch (e) {
+    // Column likely already exists
+  }
 
   return db;
 }

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { mkdirSync, existsSync, rmSync } from 'fs';
-import { spawnSync } from 'child_process';
+import { mkdirSync, existsSync, rmSync, rm } from 'fs';
+import { spawnSync, spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { getNodeSettings } from '@/lib/nodeSettings';
@@ -125,10 +125,11 @@ export async function POST(req) {
     // Write locally to SQLite identities vault
     db.prepare(`
       INSERT OR REPLACE INTO identities 
-      (role, agentId, apiUrl, companyId, executor, model, timeoutMs, apiKey, status) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+      (role, name, agentId, apiUrl, companyId, executor, model, timeoutMs, apiKey, status) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     `).run(
       roleName,
+      `Matrix Node ${roleName}`,
       agent.id,
       url,
       companyId,
@@ -156,7 +157,7 @@ export async function POST(req) {
 
 export async function PATCH(req) {
   try {
-    const { role, executor, model } = await req.json();
+    const { role, name, executor, model } = await req.json();
     if (!role || !isValidRoleName(role)) {
       return NextResponse.json({ success: false, error: "Role is required and must be valid." }, { status: 400 });
     }
@@ -168,7 +169,8 @@ export async function PATCH(req) {
       return NextResponse.json({ success: false, error: `Identity ${role} not found.` }, { status: 404 });
     }
 
-    db.prepare(`UPDATE identities SET executor = COALESCE(?, executor), model = COALESCE(?, model) WHERE role = ?`).run(
+    db.prepare(`UPDATE identities SET name = COALESCE(?, name), executor = COALESCE(?, executor), model = COALESCE(?, model) WHERE role = ?`).run(
+      name || null,
       executor || null, 
       model || null, 
       role
@@ -217,14 +219,31 @@ export async function DELETE(req) {
       try {
         const timestamp = Date.now();
         const tarPath = path.join(retiredWorkspacesDir, `${role}-${timestamp}.tar.gz`);
-        spawnSync('tar', ['-czf', tarPath, '-C', path.join(DATA_DIR, 'workspaces'), existing.agentId], { stdio: 'inherit' });
-        rmSync(workspaceDir, { recursive: true, force: true });
+        
+        // Asynchronous detached background archiving to prevent UI blocking
+        const archiveTask = spawn('tar', ['-czf', tarPath, '-C', path.join(DATA_DIR, 'workspaces'), existing.agentId], { 
+          stdio: 'ignore', 
+          detached: true 
+        });
+        
+        archiveTask.unref();
+
+        archiveTask.on('close', (code) => {
+          if (code === 0) {
+            rm(workspaceDir, { recursive: true, force: true }, (err) => {
+              if (err) console.error(`[Matrix-API] Cleanup failed for ${role}:`, err);
+            });
+          } else {
+            console.error(`[Matrix-API] Tar packing failed for ${role} with code ${code}`);
+          }
+        });
+
       } catch (e) {
         console.error(`Failed to pack workspace for ${role}:`, e);
       }
     }
 
-    return NextResponse.json({ success: true, message: `Node ${role} successfully retired and archived.` });
+    return NextResponse.json({ success: true, message: `Node ${role} successfully retired and archived in background.` });
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }

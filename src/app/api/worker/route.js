@@ -26,7 +26,7 @@ export async function POST(req) {
 
     // 0. Securely pull latest Identity keys/variables from the Cloud before Sandboxing
     const db = getDb();
-    const identity = db.prepare(`SELECT agentId, apiUrl, companyId FROM identities WHERE role = ? AND status = 'active'`).get(role);
+    const identity = db.prepare(`SELECT name, agentId, apiUrl, companyId FROM identities WHERE role = ? AND status = 'active'`).get(role);
     if (identity && identity.agentId && identity.companyId) {
       const company = db.prepare(`SELECT boardKey FROM companies WHERE id = ?`).get(identity.companyId);
       if (company && company.boardKey) {
@@ -81,6 +81,9 @@ export async function POST(req) {
       const patchPayload = { adapterType: mappedAdapterType };
       if (Object.keys(adapterConfig).length > 0) {
         patchPayload.adapterConfig = adapterConfig;
+      }
+      if (identity && identity.name) {
+        patchPayload.name = identity.name;
       }
       
       try {

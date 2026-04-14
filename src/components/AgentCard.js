@@ -8,7 +8,7 @@ function StatusDot({ status }) {
   return <span className="status-dot" style={{ width: 6, height: 6, background: color, boxShadow: `0 0 6px ${color}` }}></span>;
 }
 
-export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminate, onRefresh, showToast, adapters = [], isRetired, onRetire, onRestore, onDownloadArchive, onObliterate, isRunning = false, liveRun, onViewLogs = () => {} }) {
+export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminate, onRefresh, showToast, adapters = [], isRetired, isRetiring = false, onRetire, onRestore, onDownloadArchive, onObliterate, isRunning = false, liveRun, onViewLogs = () => {} }) {
   const [expanded, setExpanded] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [confirmRetire, setConfirmRetire] = useState(false);
@@ -109,7 +109,22 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
             <svg className="agent-card__chevron" style={{ transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)' }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
           </div>
           <div className="flex items-center gap-md">
-            <h3 style={{ fontSize: '16px', margin: 0, fontWeight: 600 }}>{id.role.toUpperCase()}</h3>
+            <div className="flex items-center gap-sm">
+              <input 
+                style={{ fontSize: '16px', margin: 0, fontWeight: 600, border: 'none', borderBottom: '1px dashed transparent', background: 'transparent', outline: 'none', color: 'var(--text-primary)', width: '180px', transition: 'border-color 0.2s' }}
+                defaultValue={id.name || `Matrix Node ${id.role}`}
+                title="Agent Alias (Editable)"
+                onFocus={(e) => e.target.style.borderBottomColor = 'var(--text-muted)'}
+                onBlur={(e) => {
+                  e.target.style.borderBottomColor = 'transparent';
+                  handleSwitch('name', e.target.value);
+                }}
+                onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
+              />
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)', background: 'var(--bg-base)', padding: '2px 6px', borderRadius: '4px', border: '1px solid var(--border-subtle)', userSelect: 'all' }} title="Technical Role ID">
+                 {id.role}
+              </div>
+            </div>
             <div className="flex items-center gap-sm" onClick={e => e.stopPropagation()} style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
               <span style={{ userSelect: 'none' }}>via</span>
               <select 
@@ -264,7 +279,9 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
               <button className="btn-outline" onClick={handleOpenSoul}>Edit SOUL</button>
               <button className="btn-outline" onClick={onBackup}>Backup</button>
               <div style={{ flex: 1 }} />
-              {confirmRetire ? (
+              {isRetiring ? (
+                <button className="btn-outline" disabled style={{ opacity: 0.6, cursor: 'not-allowed', color: 'var(--status-warn)', borderColor: 'var(--status-warn)' }}>Retiring... ⏳</button>
+              ) : confirmRetire ? (
                 <button 
                   className="btn-danger" 
                   onClick={() => { setConfirmRetire(false); onRetire(); }}

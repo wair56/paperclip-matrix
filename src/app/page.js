@@ -8,6 +8,7 @@ export default function Dashboard() {
   const [identities, setIdentities] = useState([]);
   const [retiredIdentities, setRetiredIdentities] = useState([]);
   const [runningWorkers, setRunningWorkers] = useState(new Set());
+  const [retiringWorkers, setRetiringWorkers] = useState(new Set());
   const [liveRuns, setLiveRuns] = useState({});
   const [viewingLogsFor, setViewingLogsFor] = useState(null);
   const [showAddCompany, setShowAddCompany] = useState(false);
@@ -364,6 +365,7 @@ export default function Dashboard() {
   };
 
   const handleRetire = async (roleName) => {
+    setRetiringWorkers(prev => new Set([...prev, roleName]));
     try {
       // 1. Ensure the underlying agent process is killed first
       await handleTerminate(roleName);
@@ -381,6 +383,9 @@ export default function Dashboard() {
         fetchIdentities();
       }
     } catch (err) { showToast('Exception: ' + err.message, true); }
+    finally {
+      setRetiringWorkers(prev => { const n = new Set(prev); n.delete(roleName); return n; });
+    }
   };
 
   const handleRestore = async (roleName) => {
@@ -1060,9 +1065,10 @@ export default function Dashboard() {
                       </div>
                     ) : compAgents.map(id => (
                       <AgentCard
-                        key={id.filename}
+                        key={id.role}
                         identity={id}
                         isRunning={runningWorkers.has(id.role)}
+                        isRetiring={retiringWorkers.has(id.role)}
                         liveRun={liveRuns[id.agentId]}
                         onViewLogs={() => setViewingLogsFor(id.role)}
                         onIgnite={() => handleStartWorker(id.role)}
@@ -1113,9 +1119,10 @@ export default function Dashboard() {
                         </div>
                         {compRetired.map(id => (
                           <AgentCard
-                            key={id.filename}
+                            key={id.role}
                             identity={id}
                             isRunning={runningWorkers.has(id.role)}
+                            isRetiring={retiringWorkers.has(id.role)}
                             liveRun={liveRuns[id.agentId]}
                             isRetired={true}
                             onRestore={() => handleRestore(id.role)}
@@ -1138,9 +1145,10 @@ export default function Dashboard() {
                       </div>
                       {orphanedAgents.map(id => (
                         <AgentCard
-                          key={id.filename}
+                          key={id.role}
                           identity={id}
                           isRunning={runningWorkers.has(id.role)}
+                          isRetiring={retiringWorkers.has(id.role)}
                           liveRun={liveRuns[id.agentId]}
                           onViewLogs={() => setViewingLogsFor(id.role)}
                           onIgnite={() => handleStartWorker(id.role)}
