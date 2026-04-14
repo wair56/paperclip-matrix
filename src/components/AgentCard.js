@@ -8,7 +8,7 @@ function StatusDot({ status }) {
   return <span className="status-dot" style={{ width: 6, height: 6, background: color, boxShadow: `0 0 6px ${color}` }}></span>;
 }
 
-export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminate, onRefresh, showToast, adapters = [], isRetired, isRetiring = false, onRetire, onRestore, onDownloadArchive, onObliterate, isRunning = false, liveRun, onViewLogs = () => {} }) {
+export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminate, onRefresh, showToast, adapters = [], isRetired, isRetiring = false, isObliterating = false, onRetire, onRestore, onDownloadArchive, onObliterate, isRunning = false, liveRun, onViewLogs = () => {} }) {
   const [expanded, setExpanded] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [confirmRetire, setConfirmRetire] = useState(false);
@@ -298,13 +298,15 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
               <button className="btn-primary" onClick={onRestore}>Restore to Active</button>
               <button className="btn-outline" onClick={onDownloadArchive}>Download 📥</button>
               <div style={{ flex: 1 }} />
-              {confirmRetire ? (
+              {isObliterating ? (
+                <button className="btn-outline" disabled style={{ opacity: 0.6, cursor: 'not-allowed', color: 'var(--status-err)', borderColor: 'var(--status-err)' }}>Obliterating... ⏳</button>
+              ) : confirmRetire ? (
                 <button 
                   className="btn-danger" 
                   onClick={() => { setConfirmRetire(false); onObliterate(); }}
                   onMouseLeave={() => setConfirmRetire(false)}
                 >
-                  Sure? 💀
+                  Sure? ⚠️
                 </button>
               ) : (
                 <button className="btn-danger" onClick={() => setConfirmRetire(true)}>Obliterate 💀</button>

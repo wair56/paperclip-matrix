@@ -9,6 +9,7 @@ export default function Dashboard() {
   const [retiredIdentities, setRetiredIdentities] = useState([]);
   const [runningWorkers, setRunningWorkers] = useState(new Set());
   const [retiringWorkers, setRetiringWorkers] = useState(new Set());
+  const [obliteratingWorkers, setObliteratingWorkers] = useState(new Set());
   const [liveRuns, setLiveRuns] = useState({});
   const [viewingLogsFor, setViewingLogsFor] = useState(null);
   const [showAddCompany, setShowAddCompany] = useState(false);
@@ -402,6 +403,7 @@ export default function Dashboard() {
   };
 
   const handleObliterate = async (roleName) => {
+    setObliteratingWorkers(prev => new Set([...prev, roleName]));
     try {
       const res = await fetch('/api/identity/archive', {
         method: 'DELETE',
@@ -412,6 +414,9 @@ export default function Dashboard() {
       showToast(data.success ? `Obliterated ${roleName}` : 'Failed: ' + data.error, !data.success);
       if (data.success) fetchIdentities();
     } catch (err) { showToast('Exception: ' + err.message, true); }
+    finally {
+      setObliteratingWorkers(prev => { const n = new Set(prev); n.delete(roleName); return n; });
+    }
   };
 
   const handleTerminate = async (roleName) => {
@@ -1123,6 +1128,7 @@ export default function Dashboard() {
                             identity={id}
                             isRunning={runningWorkers.has(id.role)}
                             isRetiring={retiringWorkers.has(id.role)}
+                            isObliterating={obliteratingWorkers.has(id.role)}
                             liveRun={liveRuns[id.agentId]}
                             isRetired={true}
                             onRestore={() => handleRestore(id.role)}

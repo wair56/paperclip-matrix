@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { existsSync, unlinkSync, readdirSync } from 'fs';
+import { existsSync, readdirSync, unlink } from 'fs';
 import path from 'path';
 import { DATA_DIR } from '@/lib/paths';
 import getDb from '@/lib/db';
@@ -17,14 +17,17 @@ export async function DELETE(req) {
     const db = getDb();
     db.prepare(`DELETE FROM identities WHERE role = ?`).run(role);
 
-    // Attempt to delete any associated packed workspaces
+    // Attempt to delete any associated packed workspaces in background
     if (existsSync(RETIRED_WORKSPACES_DIR)) {
       const files = readdirSync(RETIRED_WORKSPACES_DIR);
       const roleArchives = files.filter(f => f.startsWith(`${role}-`) && f.endsWith('.tar.gz'));
+      
+      // Fire and forget deletions
       roleArchives.forEach(f => {
-        try {
-          unlinkSync(path.join(RETIRED_WORKSPACES_DIR, f));
-        } catch (e) { console.error('Failed to obliterate archive', f) }
+        const fullPath = path.join(RETIRED_WORKSPACES_DIR, f);
+        unlink(fullPath, (err) => {
+          if (err) console.error(`[Matrix-API] Failed to obliterate background archive ${f}:`, err);
+        });
       });
     }
 
@@ -33,4 +36,3 @@ export async function DELETE(req) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }
-
