@@ -13,6 +13,27 @@ import { buildIdentityEnvStorage, resolveIdentityLocalEnv } from '@/lib/identity
 
 const isValidRoleName = (name) => /^[a-zA-Z0-9_-]+$/.test(name);
 
+function resolveLocalRoleName(db, requestedRole, agentId = '') {
+  let safeRole = requestedRole;
+  const existing = db.prepare(`SELECT role, agentId FROM identities WHERE role = ?`).get(safeRole);
+  if (!existing || existing.agentId === agentId) {
+    return safeRole;
+  }
+
+  const suffixBase = (agentId || 'agent').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 5) || 'agent';
+  safeRole = `${requestedRole}_${suffixBase}`;
+  let counter = 2;
+
+  while (true) {
+    const collision = db.prepare(`SELECT role, agentId FROM identities WHERE role = ?`).get(safeRole);
+    if (!collision || collision.agentId === agentId) {
+      return safeRole;
+    }
+    safeRole = `${requestedRole}_${suffixBase}_${counter}`;
+    counter += 1;
+  }
+}
+
 export async function GET() {
   try {
     const db = getDb();
@@ -134,13 +155,15 @@ export async function POST(req) {
 
     const timeoutMs = 1800000;
     
+    const localRoleName = resolveLocalRoleName(db, roleName, agent.id);
+
     // Write locally to SQLite identities vault
     db.prepare(`
       INSERT OR REPLACE INTO identities 
       (role, name, agentId, apiUrl, companyId, executor, model, timeoutMs, apiKey, status) 
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
     `).run(
-      roleName,
+      localRoleName,
       name || `Matrix Node ${roleName} (${os.hostname()})`,
       agent.id,
       url,
@@ -160,7 +183,7 @@ export async function POST(req) {
       writeFileSync(path.join(workspaceDir, 'SOUL.md'), initialSoul, 'utf8');
     }
 
-    return NextResponse.json({ success: true, agentId: agent.id, role: roleName });
+    return NextResponse.json({ success: true, agentId: agent.id, role: localRoleName });
 
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });

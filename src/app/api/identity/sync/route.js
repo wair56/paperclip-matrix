@@ -79,7 +79,7 @@ export async function POST(req) {
           for (const ra of remoteAgents) {
             const resolvedExecutor = getExecutorNameFromAdapterType(ra.adapterType === 'http' ? null : ra.adapterType, 'claude-local');
             const resolvedModel = ra.adapterConfig?.model || null;
-            const localIdentity = db.prepare(`SELECT role, envJson, localEnvJson, cloudEnvJson FROM identities WHERE agentId = ?`).get(ra.id);
+            const localIdentity = db.prepare(`SELECT role, envJson, localEnvJson, cloudEnvJson, status FROM identities WHERE agentId = ?`).get(ra.id);
             const nextEnvStorage = buildIdentityEnvStorage({
               row: localIdentity || {},
               nextCloudEnv: ra.runtimeConfig && typeof ra.runtimeConfig === 'object' ? ra.runtimeConfig : {},
@@ -93,7 +93,8 @@ export async function POST(req) {
                     model = COALESCE(?, model),
                     cloudEnvJson = ?,
                     localEnvJson = ?,
-                    envJson = ?
+                    envJson = ?,
+                    status = 'active'
                 WHERE agentId = ?
               `).run(
                 ra.name || null,
@@ -104,6 +105,10 @@ export async function POST(req) {
                 nextEnvStorage.envJson,
                 ra.id
               );
+              if (!localSet.has(ra.id)) {
+                provisionedCount++;
+              }
+              continue;
             }
 
             if (!localSet.has(ra.id)) {
