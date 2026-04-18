@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import path from 'path';
 import { DATA_DIR } from '@/lib/paths';
 import getDb from '@/lib/db';
+import { getExistingWorkspacePathForIdentity, getPrimaryWorkspacePathForIdentity } from '@/lib/workspaces';
 
 export async function GET(req) {
   try {
@@ -13,7 +14,9 @@ export async function GET(req) {
       return NextResponse.json({ success: false, error: "Missing role parameter" }, { status: 400 });
     }
 
-    const workspaceDir = path.join(DATA_DIR, 'workspaces', role);
+    const db = getDb();
+    const identity = db.prepare(`SELECT role, agentId FROM identities WHERE role = ?`).get(role) || { role };
+    const workspaceDir = getExistingWorkspacePathForIdentity(identity) || getPrimaryWorkspacePathForIdentity(identity);
     const soulPath = path.join(workspaceDir, 'SOUL.md');
 
     if (!existsSync(soulPath)) {
@@ -46,7 +49,9 @@ export async function POST(req) {
       return NextResponse.json({ success: false, error: "Missing identity attributes" }, { status: 400 });
     }
 
-    const workspaceDir = path.join(DATA_DIR, 'workspaces', role);
+    const db = getDb();
+    const identity = db.prepare(`SELECT * FROM identities WHERE role = ?`).get(role) || { role };
+    const workspaceDir = getExistingWorkspacePathForIdentity(identity) || getPrimaryWorkspacePathForIdentity(identity);
     if (!existsSync(workspaceDir)) mkdirSync(workspaceDir, { recursive: true });
 
     const soulPath = path.join(workspaceDir, 'SOUL.md');
@@ -54,14 +59,13 @@ export async function POST(req) {
 
     // Attempt to Push 'SOUL' to Paperclip Cloud as bootstrapPrompt
     try {
-      const db = getDb();
       const identity = db.prepare(`SELECT * FROM identities WHERE role = ? AND status = 'active'`).get(role);
       
       if (identity) {
         const company = db.prepare(`SELECT boardKey FROM companies WHERE id = ?`).get(identity.companyId);
 
         if (company && company.boardKey && identity.apiUrl && identity.agentId) {
-           await fetch(`${identity.apiUrl}/api/companies/${identity.companyId}/agents/${identity.agentId}`, {
+           await fetch(`${identity.apiUrl}/api/agents/${identity.agentId}`, {
              method: 'PATCH',
              headers: { 'Authorization': `Bearer ${company.boardKey}`, 'Content-Type': 'application/json' },
              body: JSON.stringify({ adapterConfig: { bootstrapPrompt: soul } })
@@ -79,4 +83,3 @@ export async function POST(req) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }
-

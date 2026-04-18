@@ -654,9 +654,62 @@ export async function runChildProcess(runId, command, args, opts) {
             .catch(reject);
     });
 }
+function trimWakeString(value) {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+function wakeArray(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value
+        .map((entry) => trimWakeString(entry))
+        .filter((entry) => typeof entry === "string");
+}
+export function stringifyPaperclipWakePayload(value) {
+    const payload = parseObject(value);
+    if (Object.keys(payload).length === 0)
+        return "";
+    try {
+        return JSON.stringify(payload, null, 2);
+    }
+    catch {
+        return "";
+    }
+}
+export function renderPaperclipWakePrompt(value, options = {}) {
+    const payload = parseObject(value);
+    if (Object.keys(payload).length === 0)
+        return "";
+    const lines = ["Structured Paperclip wake context:"];
+    const taskId = trimWakeString(payload.taskId);
+    const issueId = trimWakeString(payload.issueId);
+    const wakeReason = trimWakeString(payload.wakeReason);
+    const wakeCommentId = trimWakeString(payload.wakeCommentId ?? payload.commentId);
+    const approvalId = trimWakeString(payload.approvalId);
+    const approvalStatus = trimWakeString(payload.approvalStatus);
+    const issueIds = wakeArray(payload.issueIds);
+    if (taskId)
+        lines.push(`- Task ID: ${taskId}`);
+    if (issueId)
+        lines.push(`- Issue ID: ${issueId}`);
+    if (wakeReason)
+        lines.push(`- Wake reason: ${wakeReason}`);
+    if (wakeCommentId)
+        lines.push(`- Wake comment ID: ${wakeCommentId}`);
+    if (approvalId)
+        lines.push(`- Approval ID: ${approvalId}`);
+    if (approvalStatus)
+        lines.push(`- Approval status: ${approvalStatus}`);
+    if (issueIds.length > 0)
+        lines.push(`- Linked issue IDs: ${issueIds.join(", ")}`);
+    if (options.resumedSession)
+        lines.push("- Session state: resumed existing conversation");
+    const renderedJson = stringifyPaperclipWakePayload(payload);
+    if (lines.length === 1 && renderedJson) {
+        return ["Structured Paperclip wake payload JSON:", "```json", renderedJson, "```"].join("\n");
+    }
+    if (renderedJson) {
+        lines.push("", "Structured wake payload JSON:", "```json", renderedJson, "```");
+    }
+    return lines.join("\n");
+}
 //# sourceMappingURL=server-utils.js.map
-export function renderPaperclipWakePrompt() { return ""; }
-export function stringifyPaperclipWakePayload() { return ""; }
-export function renderTemplate(template, data) { return template || ""; }
-export function resolvePaperclipDesiredSkillNames() { return []; }
-export function ensurePaperclipSkillSymlink() { return Promise.resolve(); }

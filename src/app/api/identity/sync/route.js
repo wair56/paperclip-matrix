@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import getDb from '@/lib/db';
+import { getExecutorNameFromAdapterType } from '@/lib/executors';
+import { buildIdentityEnvStorage } from '@/lib/identityEnv';
 
 export async function POST(req) {
   try {
@@ -75,6 +77,35 @@ export async function POST(req) {
 
           // 2. Check remote agents against local truth (Provision missing agents)
           for (const ra of remoteAgents) {
+            const resolvedExecutor = getExecutorNameFromAdapterType(ra.adapterType === 'http' ? null : ra.adapterType, 'claude-local');
+            const resolvedModel = ra.adapterConfig?.model || null;
+            const localIdentity = db.prepare(`SELECT role, envJson, localEnvJson, cloudEnvJson FROM identities WHERE agentId = ?`).get(ra.id);
+            const nextEnvStorage = buildIdentityEnvStorage({
+              row: localIdentity || {},
+              nextCloudEnv: ra.runtimeConfig && typeof ra.runtimeConfig === 'object' ? ra.runtimeConfig : {},
+            });
+
+            if (localIdentity) {
+              db.prepare(`
+                UPDATE identities
+                SET name = COALESCE(?, name),
+                    executor = COALESCE(?, executor),
+                    model = COALESCE(?, model),
+                    cloudEnvJson = ?,
+                    localEnvJson = ?,
+                    envJson = ?
+                WHERE agentId = ?
+              `).run(
+                ra.name || null,
+                ra.adapterType === 'http' ? null : resolvedExecutor,
+                resolvedModel,
+                nextEnvStorage.cloudEnvJson,
+                nextEnvStorage.localEnvJson,
+                nextEnvStorage.envJson,
+                ra.id
+              );
+            }
+
             if (!localSet.has(ra.id)) {
               // Exists natively on Cloud, but completely missing locally! Auto-provision it.
               let safeRole = (ra.role || 'orphan').replace(/[^a-zA-Z0-9_-]/g, '');
@@ -82,21 +113,24 @@ export async function POST(req) {
               if (existingRole) {
                 safeRole = `${safeRole}_${ra.id.substring(0, 5)}`;
               }
-              const adapterType = ra.adapterType === 'http' ? 'claude-local' : (ra.adapterType || 'claude-local');
               
               db.prepare(`
                 INSERT OR REPLACE INTO identities 
-                (role, name, agentId, apiUrl, companyId, executor, timeoutMs, apiKey, status) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                (role, name, agentId, apiUrl, companyId, executor, model, timeoutMs, apiKey, envJson, localEnvJson, cloudEnvJson, status) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
               `).run(
                 safeRole,
                 ra.name || null,
                 ra.id,
                 company.apiUrl,
                 company.id,
-                adapterType,
+                resolvedExecutor,
+                resolvedModel,
                 1800000,
-                company.boardKey // Use boardKey as fallback API key
+                company.boardKey, // Use boardKey as fallback API key
+                nextEnvStorage.envJson,
+                nextEnvStorage.localEnvJson,
+                nextEnvStorage.cloudEnvJson
               );
               provisionedCount++;
             }
@@ -113,4 +147,3 @@ export async function POST(req) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }
-

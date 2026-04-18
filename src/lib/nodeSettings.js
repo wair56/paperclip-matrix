@@ -1,4 +1,5 @@
 import getDb from './db';
+import { parseEnvText } from './cliEnv';
 
 const DEFAULT_SETTINGS = {
   frp: {
@@ -10,6 +11,13 @@ const DEFAULT_SETTINGS = {
   proxy: {
     httpsProxy: '',
     openaiBaseUrl: ''
+  },
+  cli: {
+    envText: '',
+    envVars: {}
+  },
+  agentRules: {
+    globalPrompt: 'You are completing tasks autonomously as an API backend worker. You MUST run headlessly. DO NOT use interactive CLI tools like "clarify" that pause for user terminal input. You MUST use the platform-provided "Paperclip Issue Comment" scripts or tools to post your responses back to the task issuer.'
   }
 };
 
@@ -69,4 +77,12 @@ export function saveNodeSettings(settings) {
   } catch (err) {
     console.error("Failed to save node-settings to DB:", err);
   }
+}
+
+export function resolveCliRuntimeEnv(settings = getNodeSettings()) {
+  const fromText = parseEnvText(settings?.cli?.envText || '').envVars;
+  return {
+    ...fromText,
+    ...(settings?.cli?.envVars || {})
+  };
 }

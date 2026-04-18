@@ -85,6 +85,10 @@ export declare function resolvePaperclipDesiredSkillNames(config: Record<string,
 export declare function writePaperclipSkillSyncPreference(config: Record<string, unknown>, desiredSkills: string[]): Record<string, unknown>;
 export declare function ensurePaperclipSkillSymlink(source: string, target: string, linkSkill?: (source: string, target: string) => Promise<void>): Promise<"created" | "repaired" | "skipped">;
 export declare function removeMaintainerOnlySkillSymlinks(skillsHome: string, allowedSkillNames: Iterable<string>): Promise<string[]>;
+export declare function renderPaperclipWakePrompt(value: unknown, options?: {
+    resumedSession?: boolean;
+}): string;
+export declare function stringifyPaperclipWakePayload(value: unknown): string;
 export declare function ensureCommandResolvable(command: string, cwd: string, env: NodeJS.ProcessEnv): Promise<void>;
 export declare function runChildProcess(runId: string, command: string, args: string[], opts: {
     cwd: string;

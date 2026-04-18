@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "baseUrl": ".",
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
@@ -9,9 +10,12 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "types": ["node"],
+    "ignoreDeprecations": "6.0",
     "paths": {
-      "@paperclipai/adapter-utils": ["./src/lib/adapter-utils/dist/index.js"],
-      "@paperclipai/adapter-utils/*": ["./src/lib/adapter-utils/dist/*"]
+      "@paperclipai/adapter-utils": ["./src/lib/adapter-utils/dist/index"],
+      "@paperclipai/adapter-utils/*": ["./src/lib/adapter-utils/dist/*"],
+      "vitest": ["./src/lib/test-shims/vitest.d.ts"]
     }
   }
 }

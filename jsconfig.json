@@ -1,8 +1,9 @@
 {
   "compilerOptions": {
+    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
-      "@paperclipai/adapter-utils": ["./src/lib/adapter-utils/dist/index.js"],
+      "@paperclipai/adapter-utils": ["./src/lib/adapter-utils/dist/index"],
       "@paperclipai/adapter-utils/*": ["./src/lib/adapter-utils/dist/*"]
     }
   }

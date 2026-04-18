@@ -15,13 +15,31 @@ export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
 
 /**
- * Models available through Hermes Agent.
- *
- * Hermes supports any model via any provider. The Paperclip UI should
- * prefer detectModel() plus manual entry over curated placeholder models,
- * since Hermes availability depends on the user's local configuration.
+ * Models available through Hermes Agent (synced from LiteLLM).
  */
-export const models: { id: string; label: string }[] = [];
+export const models: { id: string; label: string }[] = [
+  { id: "codex", label: "Codex" },
+  { id: "gpt-5.4", label: "GPT-5.4" },
+  { id: "dmx-gpt-5.4", label: "DMX GPT-5.4" },
+  { id: "dmx-gpt-5.4-mini", label: "DMX GPT-5.4 Mini" },
+  { id: "dmx-claude-sonnet-4-6", label: "DMX Claude Sonnet 4.6" },
+  { id: "codechn-gpt-5.4", label: "CodeCHN GPT-5.4" },
+  { id: "openai-gpt-5.4", label: "OpenAI GPT-5.4" },
+  { id: "ark-coding-claude-sonnet", label: "Ark Claude Sonnet" },
+  { id: "ark-coding-gpt-5.4", label: "Ark GPT-5.4" },
+  { id: "codechn-gpt-5.2-codex", label: "CodeCHN GPT-5.2 Codex" },
+  { id: "codechn-gpt-5.3-codex", label: "CodeCHN GPT-5.3 Codex" },
+  { id: "ark-code-latest", label: "Ark Code Latest" },
+  { id: "doubao-seed-code", label: "Doubao Seed Code" },
+  { id: "kimi-k2.5", label: "Kimi K2.5" },
+  { id: "glm-4.7", label: "GLM 4.7" },
+  { id: "deepseek-v3.2", label: "DeepSeek V3.2" },
+  { id: "doubao-seed-2.0-code", label: "Doubao Seed 2.0 Code" },
+  { id: "doubao-seed-2.0-pro", label: "Doubao Seed 2.0 Pro" },
+  { id: "doubao-seed-2.0-lite", label: "Doubao Seed 2.0 Lite" },
+  { id: "minimax-m2.5", label: "MiniMax M2.5" },
+  { id: "glm-5.1", label: "GLM 5.1" },
+];
 
 /**
  * Documentation shown in the Paperclip UI when configuring a Hermes agent.

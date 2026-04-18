@@ -25,11 +25,11 @@ export async function GET(req, { params }) {
       throw new Error(`Remote API error: ${remoteRes.status}`);
     }
 
-    const data = await remoteRes.json();
+    const payload = await remoteRes.json();
+    const data = Array.isArray(payload) ? payload : (payload.data || payload.runs || []);
     
     return NextResponse.json({ success: true, data });
   } catch (err) {
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }
 }
-

@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
 function formatDate(ts) {
   if (!ts) return 'N/A';
@@ -7,9 +7,60 @@ function formatDate(ts) {
   return d.toLocaleString();
 }
 
-function RunCard({ run, companyName, agentName }) {
+function formatElapsed(receivedAt, repliedAt, nowTs) {
+  if (!receivedAt) return 'N/A';
+  const end = repliedAt || nowTs;
+  const diffMs = Math.max(0, end - receivedAt);
+  const totalSec = Math.floor(diffMs / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
+}
+
+function RunCard({ run, companyName, agentName, onRefresh }) {
   const [expanded, setExpanded] = useState(false);
-  const duration = run.repliedAt && run.receivedAt ? ((run.repliedAt - run.receivedAt) / 1000).toFixed(1) + 's' : '...';
+  const [details, setDetails] = useState(null);
+  const [loadingDetails, setLoadingDetails] = useState(false);
+  const [nowTs, setNowTs] = useState(Date.now());
+  const [isKilling, setIsKilling] = useState(false);
+  const duration = run.repliedAt && run.receivedAt ? ((run.repliedAt - run.receivedAt) / 1000).toFixed(1) + 's' : formatElapsed(run.receivedAt, null, nowTs);
+  const resolvedRun = details || run;
+
+  useEffect(() => {
+    if (run.status !== 'running') return;
+    const timer = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [run.status]);
+
+  const toggleExpanded = async () => {
+    const nextExpanded = !expanded;
+    setExpanded(nextExpanded);
+    if (!nextExpanded || details || !run.id) return;
+
+    try {
+      setLoadingDetails(true);
+      const res = await fetch(`/api/runs/${run.id}`, { cache: 'no-store' });
+      const data = await res.json();
+      if (data.success) {
+        setDetails(data.run || null);
+      }
+    } catch (e) {
+      // Best-effort details fetch; keep previews if it fails.
+    } finally {
+      setLoadingDetails(false);
+    }
+  };
+
+  const handleKill = async () => {
+    if (!run.id || isKilling) return;
+    setIsKilling(true);
+    try {
+      await fetch(`/api/runs/${run.id}`, { method: 'DELETE' });
+      await onRefresh?.();
+    } finally {
+      setIsKilling(false);
+    }
+  };
 
   return (
     <div style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-lg)', marginBottom: 'var(--space-md)' }}>
@@ -27,7 +78,7 @@ function RunCard({ run, companyName, agentName }) {
           </span>
           <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
             ↓ {formatDate(run.receivedAt)}
-            {run.repliedAt ? `  |  ↑ ${formatDate(run.repliedAt)} (${duration})` : '  |  (Running...)'}
+            {run.repliedAt ? `  |  ↑ ${formatDate(run.repliedAt)} (${duration})` : `  |  Running ${duration}`}
           </span>
         </div>
         <div className="flex gap-sm items-center">
@@ -38,7 +89,17 @@ function RunCard({ run, companyName, agentName }) {
           }}>
             {run.status.toUpperCase()}
           </span>
-          <button className="btn-outline" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => setExpanded(!expanded)}>
+          {run.status === 'running' && (
+            <button
+              className="btn-danger"
+              style={{ fontSize: 11, padding: '2px 8px' }}
+              onClick={handleKill}
+              disabled={isKilling}
+            >
+              {isKilling ? 'Killing...' : 'Kill'}
+            </button>
+          )}
+          <button className="btn-outline" style={{ fontSize: 11, padding: '2px 8px' }} onClick={toggleExpanded}>
             {expanded ? 'Collapse' : 'Expand Details'}
           </button>
         </div>
@@ -55,7 +116,9 @@ function RunCard({ run, companyName, agentName }) {
                fontFamily: 'monospace', fontSize: '12px', color: 'var(--text-secondary)',
                maxHeight: '600px', overflowY: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word'
              }}>
-               {run.prompt || 'No Prompt Recorded'}
+               {loadingDetails
+                 ? 'Loading full task content...'
+                 : (resolvedRun.prompt || run.promptPreview || 'No Prompt Recorded')}
              </div>
            </div>
 
@@ -68,7 +131,9 @@ function RunCard({ run, companyName, agentName }) {
                fontFamily: 'monospace', fontSize: '12px', color: 'var(--text-primary)',
                maxHeight: '600px', overflowY: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word'
              }}>
-               {run.response || (run.status === 'running' ? 'Waiting for response...' : 'No Response')}
+               {loadingDetails
+                 ? 'Loading full reply...'
+                 : (resolvedRun.response || run.responsePreview || (run.status === 'running' ? 'Waiting for response...' : 'No Response'))}
              </div>
            </div>
         </div>
@@ -77,44 +142,55 @@ function RunCard({ run, companyName, agentName }) {
   );
 }
 
-export default function GlobalRunViewer() {
-  const [companies, setCompanies] = useState([]);
-  const [identities, setIdentities] = useState([]);
+export default function GlobalRunViewer({ companies: initialCompanies = [], identities: initialIdentities = [] }) {
+  const [companies, setCompanies] = useState(initialCompanies);
+  const [identities, setIdentities] = useState(initialIdentities);
   const [runs, setRuns] = useState([]);
+  const [limit, setLimit] = useState(30);
+  const [hasMore, setHasMore] = useState(false);
   
   const [filterCompanyId, setFilterCompanyId] = useState('');
   const [filterAgentId, setFilterAgentId] = useState('');
 
+  const fetchRuns = useCallback(async () => {
+    let url = '/api/runs?';
+    if (filterCompanyId) url += `companyId=${filterCompanyId}&`;
+    if (filterAgentId) url += `agentId=${filterAgentId}&`;
+    url += `limit=${limit}`;
+
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      const data = await res.json();
+      if (data.success) {
+        setRuns(data.runs || []);
+        setHasMore(Boolean(data.hasMore));
+      }
+    } catch(e) {}
+  }, [filterCompanyId, filterAgentId, limit]);
+
   // Fetch reference data once
   useEffect(() => {
-    fetch('/api/companies').then(res => res.json()).then(data => {
-      if(data.success) setCompanies(data.companies || []);
-    });
-    fetch('/api/identity').then(res => res.json()).then(data => {
-      if(data.success) setIdentities(data.identities || []);
-    });
-  }, []);
+    if (initialCompanies.length === 0) {
+      fetch('/api/companies').then(res => res.json()).then(data => {
+        if(data.success) setCompanies(data.companies || []);
+      });
+    }
+    if (initialIdentities.length === 0) {
+      fetch('/api/identity').then(res => res.json()).then(data => {
+        if(data.success) setIdentities(data.identities || []);
+      });
+    }
+  }, [initialCompanies, initialIdentities]);
 
   // Poll runs
   useEffect(() => {
-    const fetchRuns = async () => {
-      let url = '/api/runs?';
-      if (filterCompanyId) url += `companyId=${filterCompanyId}&`;
-      if (filterAgentId) url += `agentId=${filterAgentId}&`;
-
-      try {
-        const res = await fetch(url);
-        const data = await res.json();
-        if (data.success) {
-          setRuns(data.runs || []);
-        }
-      } catch(e) {}
+    const immediate = setTimeout(fetchRuns, 0);
+    const intv = setInterval(fetchRuns, 10000);
+    return () => {
+      clearTimeout(immediate);
+      clearInterval(intv);
     };
-
-    fetchRuns();
-    const intv = setInterval(fetchRuns, 3000);
-    return () => clearInterval(intv);
-  }, [filterCompanyId, filterAgentId]);
+  }, [fetchRuns]);
 
   return (
     <div style={{ padding: 'var(--space-xl)' }}>
@@ -150,10 +226,17 @@ export default function GlobalRunViewer() {
           runs.map(r => {
             const comp = companies.find(c => c.id === r.companyId);
             const ag = identities.find(i => i.agentId === r.agentId || i.role === r.role);
-            return <RunCard key={r.id} run={r} companyName={comp?.name} agentName={ag?.name || r.role} />
+            return <RunCard key={r.id} run={r} companyName={comp?.name} agentName={ag?.name || r.role} onRefresh={fetchRuns} />
           })
         )}
       </div>
+      {hasMore && (
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 'var(--space-lg)' }}>
+          <button className="btn-outline" onClick={() => setLimit((prev) => prev + 30)}>
+            Load 30 More
+          </button>
+        </div>
+      )}
     </div>
   );
 }

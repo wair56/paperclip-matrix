@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
+import { parseEnvText } from '@/lib/cliEnv';
 
 function StatusDot({ status }) {
   let color = 'var(--status-err)';
@@ -16,6 +17,14 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
   const [isEditingSoul, setIsEditingSoul] = useState(false);
   const [soulContent, setSoulContent] = useState('');
   const [savingSoul, setSavingSoul] = useState(false);
+  const [supportedModels, setSupportedModels] = useState([]);
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResponse, setTestResponse] = useState(null);
+  const [modelInput, setModelInput] = useState(null);
+  const [envText, setEnvText] = useState(id.envText || '');
+  const [savingEnv, setSavingEnv] = useState(false);
+  const effectiveModelInput = modelInput === null ? (id.model || '') : modelInput;
+  const parsedEnv = parseEnvText(envText || '');
 
   // Run health check on mount
   useEffect(() => {
@@ -35,7 +44,30 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
     return () => clearInterval(interval);
   }, [id.role, id.apiUrl]);
 
+  // Fetch supported models for this agent's executor on mount
+  useEffect(() => {
+    if (!id.executor) return;
+    const fetchModels = async () => {
+      try {
+        const res = await fetch('/api/adapters/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ adapter: id.executor })
+        });
+        const data = await res.json();
+        if (data.success && data.models) {
+          setSupportedModels(data.models);
+        }
+      } catch (e) { console.error('Failed to fetch models', e); }
+    };
+    fetchModels();
+  }, [id.executor]);
+
   const handleSwitch = async (field, value) => {
+    // Skip if value is unchanged
+    const currentVal = id[field] ?? '';
+    if (String(value).trim() === String(currentVal).trim()) return;
+
     setSwitching(true);
     try {
       const body = { role: id.role };
@@ -47,6 +79,7 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
       });
       const data = await res.json();
       if (data.success) {
+        setModelInput(null);
         onRefresh();
         showToast(`Switched ${field} to ${value}`, false);
         if (isRunning) {
@@ -100,6 +133,54 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
     setSavingSoul(false);
   };
 
+  const handleTestAgent = async () => {
+    setIsTesting(true);
+    setTestResponse(null);
+    try {
+      const res = await fetch('/api/identity/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: id.role })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setTestResponse({ success: true, text: data.response, meta: [data.executor, data.model].filter(Boolean).join(' · ') });
+      } else {
+        const detail = [data.error, data.stderr].filter(Boolean).join('\n');
+        setTestResponse({ success: false, text: detail || 'Unknown error' });
+      }
+    } catch (e) {
+      setTestResponse({ success: false, text: 'Network error or timeout.' });
+    }
+    setIsTesting(false);
+  };
+
+  const handleSaveEnv = async () => {
+    setSavingEnv(true);
+    try {
+      const res = await fetch('/api/identity', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: id.role, envText }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setEnvText(data.envText ?? envText);
+        onRefresh();
+        if (data.warnings?.length > 0) {
+          showToast(`已保存，但有 ${data.warnings.length} 行格式无法解析`, true);
+        } else {
+          showToast('Agent runtime env overrides 已保存', false);
+        }
+      } else {
+        showToast(`保存 env 失败: ${data.error}`, true);
+      }
+    } catch (e) {
+      showToast(`保存 env 失败: ${e.message}`, true);
+    }
+    setSavingEnv(false);
+  };
+
   return (
     <div className="agent-card flex-col" style={{ alignItems: 'stretch', gap: 'var(--space-md)' }}>
       {/* Row 1: Header */}
@@ -139,15 +220,45 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
               
               <span style={{ color: 'var(--border-interactive)', userSelect: 'none' }}>/</span>
               
-              <input
-                 style={{ border: 'none', borderBottom: '1px dashed var(--text-muted)', background: 'transparent', color: 'var(--accent)', fontSize: '13px', fontWeight: 600, outline: 'none', width: '80px', padding: '0 2px' }}
-                 placeholder="model: auto"
-                 defaultValue={id.model || ''}
-                 disabled={switching}
-                 onBlur={e => handleSwitch('model', e.target.value)}
-                 onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
-                 title="Hit Enter or unfocus to apply"
-              />
+              <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 4 }}>
+                {effectiveModelInput === '__custom__' ? (
+                  <input
+                    autoFocus
+                    style={{ border: 'none', borderBottom: '1px dashed var(--accent)', background: 'transparent', color: 'var(--accent)', fontSize: '13px', fontWeight: 600, outline: 'none', width: '120px', padding: '0 2px' }}
+                    placeholder="type model name..."
+                    disabled={switching}
+                    onBlur={e => {
+                      const val = e.target.value.trim();
+                      if (val) { setModelInput(val); handleSwitch('model', val); }
+                      else setModelInput(null);
+                    }}
+                    onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') setModelInput(null); }}
+                  />
+                ) : (
+                  <select
+                    className="agent-card__inline-select"
+                    style={{ border: 'none', borderBottom: '1px dashed var(--text-muted)', background: 'transparent', color: 'var(--accent)', fontSize: '13px', fontWeight: 600, cursor: 'pointer', outline: 'none', padding: '0 2px', maxWidth: '140px' }}
+                    value={effectiveModelInput || 'auto'}
+                    disabled={switching}
+                    onChange={e => {
+                      const val = e.target.value;
+                      if (val === '__custom__') { setModelInput('__custom__'); return; }
+                      setModelInput(val);
+                      handleSwitch('model', val);
+                    }}
+                  >
+                    <option value="auto">auto</option>
+                    {/* Current model if not in list */}
+                    {effectiveModelInput && effectiveModelInput !== 'auto' && !supportedModels.find(m => m.id === effectiveModelInput) && (
+                      <option value={effectiveModelInput}>{effectiveModelInput}</option>
+                    )}
+                    {supportedModels.map(m => (
+                      <option key={m.id} value={m.id}>{m.id}</option>
+                    ))}
+                    <option value="__custom__">Custom…</option>
+                  </select>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -274,11 +385,61 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
       </div>
 
       {/* Row 4: Advanced Actions */}
+      <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 'var(--space-md)' }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 'var(--space-sm)', gap: 'var(--space-md)', flexWrap: 'wrap' }}>
+          <div>
+            <label style={{ display: 'block', marginBottom: 4 }}>Local Runtime Env Overrides</label>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              仅作用于这个 agent 的本地 CLI 沙箱；优先级高于全局 CLI Runtime Config，不会覆盖云端任务数据。
+            </div>
+          </div>
+          <div className="flex items-center gap-sm" style={{ flexWrap: 'wrap' }}>
+            <span style={{
+              fontSize: 10, padding: '2px 8px', borderRadius: 'var(--radius-sm)',
+              background: Object.keys(parsedEnv.envVars).length > 0 ? 'rgba(52,211,153,0.12)' : 'var(--bg-base)',
+              color: Object.keys(parsedEnv.envVars).length > 0 ? 'var(--status-ok)' : 'var(--text-muted)',
+            }}>
+              {Object.keys(parsedEnv.envVars).length} keys
+            </span>
+            {parsedEnv.errors.length > 0 && (
+              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 'var(--radius-sm)', background: 'rgba(248,113,113,0.12)', color: 'var(--status-err)' }}>
+                {parsedEnv.errors.length} invalid lines
+              </span>
+            )}
+          </div>
+        </div>
+        <textarea
+          value={envText}
+          onChange={(e) => setEnvText(e.target.value)}
+          placeholder={'CODEX_API_KEY=...\nOPENAI_API_KEY=...\nCUSTOM_FLAG=1'}
+          style={{ width: '100%', minHeight: 92, fontFamily: 'monospace', fontSize: 12, padding: 'var(--space-sm)', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', resize: 'vertical' }}
+        />
+        <div className="flex items-center justify-between" style={{ marginTop: 'var(--space-sm)', gap: 'var(--space-sm)', flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            {Object.keys(parsedEnv.envVars).length > 0 ? Object.keys(parsedEnv.envVars).join(', ') : 'No per-agent runtime overrides'}
+          </div>
+          <div className="flex gap-sm">
+            <button className="btn-outline" onClick={() => setEnvText(id.envText || '')} disabled={savingEnv}>Reset</button>
+            <button className="btn-outline" onClick={handleSaveEnv} disabled={savingEnv} style={savingEnv ? { opacity: 0.6 } : {}}>
+              {savingEnv ? 'Saving...' : 'Save Env'}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div className="flex gap-sm" style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 'var(--space-md)' }}>
          {!isRetired ? (
             <>
               <button className="btn-outline" onClick={handleOpenSoul}>Edit SOUL</button>
               <button className="btn-outline" onClick={onBackup}>Backup</button>
+              <button 
+                className="btn-outline" 
+                onClick={handleTestAgent} 
+                disabled={isTesting}
+                style={isTesting ? { opacity: 0.6 } : {}}
+              >
+                {isTesting ? 'Testing...' : 'Test Agent'}
+              </button>
               <div style={{ flex: 1 }} />
               {isRetiring ? (
                 <button className="btn-outline" disabled style={{ opacity: 0.6, cursor: 'not-allowed', color: 'var(--status-warn)', borderColor: 'var(--status-warn)' }}>Retiring... ⏳</button>
@@ -315,6 +476,29 @@ export default function AgentCard({ identity: id, onIgnite, onBackup, onTerminat
             </>
          )}
       </div>
+       
+       {testResponse && (
+         <div style={{ 
+           marginTop: 'var(--space-md)', 
+           padding: 'var(--space-sm) var(--space-md)', 
+           background: testResponse.success ? 'rgba(52,211,153,0.05)' : 'rgba(248,113,113,0.05)', 
+           border: `1px solid ${testResponse.success ? 'var(--status-ok)' : 'var(--status-err)'}`,
+           borderRadius: '4px',
+           fontSize: '13px',
+           color: testResponse.success ? 'var(--text-primary)' : 'var(--status-err)'
+         }}>
+           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+             <span style={{ fontWeight: 600, fontSize: 11, textTransform: 'uppercase' }}>
+               {testResponse.success ? '✓ Agent Response' : '✗ Connection Failed'}
+             </span>
+             {testResponse.meta && (
+               <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'monospace' }}>{testResponse.meta}</span>
+             )}
+             <span style={{ cursor: 'pointer', opacity: 0.6 }} onClick={() => setTestResponse(null)}>✕</span>
+           </div>
+           <div style={{ fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>{testResponse.text}</div>
+         </div>
+       )}
 
       </div>
       )}

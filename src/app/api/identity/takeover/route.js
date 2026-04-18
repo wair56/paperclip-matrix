@@ -63,7 +63,7 @@ export async function POST(req) {
     );
 
     // Make sure workspace sandbox directory exists
-    const workspaceDir = path.join(DATA_DIR, 'workspaces', roleName);
+    const workspaceDir = path.join(DATA_DIR, 'workspaces', agentId);
     if (!existsSync(workspaceDir)) mkdirSync(workspaceDir, { recursive: true });
 
     return NextResponse.json({ 
@@ -75,4 +75,3 @@ export async function POST(req) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }
-

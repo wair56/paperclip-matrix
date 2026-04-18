@@ -5,6 +5,8 @@ import getDb from '@/lib/db';
 import { appendFileSync } from 'fs';
 import path from 'path';
 import { LOGS_DIR } from '@/lib/paths';
+import { getExecutorAdapterType } from '@/lib/executors';
+import { buildIdentityEnvStorage } from '@/lib/identityEnv';
 
 // Use globalThis to persist across HMR in development
 if (!globalThis.__matrixActiveWorkers) {
@@ -26,7 +28,7 @@ export async function POST(req) {
 
     // 0. Securely pull latest Identity keys/variables from the Cloud before Sandboxing
     const db = getDb();
-    const identity = db.prepare(`SELECT name, agentId, apiUrl, companyId, envJson FROM identities WHERE role = ? AND status = 'active'`).get(role);
+    const identity = db.prepare(`SELECT name, agentId, apiUrl, companyId, envJson, localEnvJson, cloudEnvJson FROM identities WHERE role = ? AND status = 'active'`).get(role);
     if (identity && identity.agentId && identity.companyId) {
       const company = db.prepare(`SELECT boardKey FROM companies WHERE id = ?`).get(identity.companyId);
       if (company && company.boardKey) {
@@ -38,11 +40,14 @@ export async function POST(req) {
             const data = await fetchRes.json();
             const cloudAgent = data.data || data.agent || data;
             if (cloudAgent) {
-              const envPayload = (cloudAgent.runtimeConfig && Object.keys(cloudAgent.runtimeConfig).length > 0)
-                ? JSON.stringify(cloudAgent.runtimeConfig)
-                : identity.envJson || null;
-              db.prepare(`UPDATE identities SET envJson = ?, name = ? WHERE role = ?`)
-                .run(envPayload, cloudAgent.name || identity.name, role);
+              const nextEnvStorage = buildIdentityEnvStorage({
+                row: identity,
+                nextCloudEnv: cloudAgent.runtimeConfig && typeof cloudAgent.runtimeConfig === 'object'
+                  ? cloudAgent.runtimeConfig
+                  : {},
+              });
+              db.prepare(`UPDATE identities SET cloudEnvJson = ?, localEnvJson = ?, envJson = ?, name = ? WHERE role = ?`)
+                .run(nextEnvStorage.cloudEnvJson, nextEnvStorage.localEnvJson, nextEnvStorage.envJson, cloudAgent.name || identity.name, role);
               console.log(`[Matrix-Orchestrator] Pulled latest secure API keys & name for agent ${role} from Cloud.`);
             }
           }
@@ -68,7 +73,7 @@ export async function POST(req) {
     // Auto-Heal: Ensure the remote Agent natively maps to its core adapter module.
     // e.g. "claude-local" -> "claude_local"
     if (payload.env.PAPERCLIP_API_URL && payload.env.PAPERCLIP_AGENT_ID && payload.env.PAPERCLIP_API_KEY) {
-      let mappedAdapterType = (payload.executorName || "claude_local").replace(/-/g, '_');
+      let mappedAdapterType = getExecutorAdapterType(payload.executorName || 'claude-local');
       const adapterConfig = {};
       
       const nodeSettings = getNodeSettings();
@@ -111,6 +116,11 @@ export async function POST(req) {
     const logPath = path.join(LOGS_DIR, `${role}.log`);
     appendFileSync(logPath, `\n[Matrix] Node ${role} is IGNITED. Listening for HTTP Webhooks...\n`);
 
+    // Persist running state to DB (survives page refreshes)
+    try {
+      db.prepare(`UPDATE identities SET isActive = 1 WHERE role = ?`).run(role);
+    } catch(e) { console.warn('[Matrix-Orchestrator] Could not persist isActive state:', e.message); }
+
     // In Webhook Native Mode, we don't spawn a detached CLI process.
     // Instead we register a Virtual PID to tell the UI that this node is "Running" and ready.
     const virtualPid = Date.now();
@@ -130,15 +140,19 @@ export async function POST(req) {
 export async function DELETE(req) {
   try {
     const { role } = await req.json();
-    if (!activeWorkers.has(role)) {
-      return NextResponse.json({ success: false, error: `Worker ${role} is not seemingly active in this session.` }, { status: 404 });
-    }
+    const wasTracked = activeWorkers.has(role);
     
     // Virtual PID (Date.now()) is not a real process — just remove from tracking map.
     // Do NOT call process.kill() on it.
     activeWorkers.delete(role);
 
-    return NextResponse.json({ success: true, message: `Terminated Worker [${role}]` });
+    // Persist stopped state to DB
+    const db = getDb();
+    try {
+      db.prepare(`UPDATE identities SET isActive = 0 WHERE role = ?`).run(role);
+    } catch(e) { console.warn('[Matrix-Orchestrator] Could not clear isActive state:', e.message); }
+
+    return NextResponse.json({ success: true, message: wasTracked ? `Terminated Worker [${role}]` : `Worker [${role}] state cleared.` });
   } catch (err) {
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });
   }

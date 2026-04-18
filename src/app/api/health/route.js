@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server';
 import { existsSync } from 'fs';
-import path from 'path';
-import { WORKSPACES_DIR } from '@/lib/paths';
 import getDb from '@/lib/db';
+import { getExistingWorkspacePathForIdentity } from '@/lib/workspaces';
 
 export async function POST(req) {
   try {
@@ -20,10 +19,14 @@ export async function POST(req) {
 
     // 1. Local checks
     const db = getDb();
-    const identityExists = !!db.prepare(`SELECT 1 FROM identities WHERE role = ? AND status = 'active'`).get(role);
+    const identity = db.prepare(`SELECT agentId FROM identities WHERE role = ? AND status = 'active'`).get(role);
     
-    result.local.identity = identityExists;
-    result.local.workspace = existsSync(path.join(WORKSPACES_DIR, role));
+    result.local.identity = !!identity;
+    if (identity && identity.agentId) {
+      result.local.workspace = !!getExistingWorkspacePathForIdentity(identity);
+    } else {
+      result.local.workspace = false;
+    }
 
     // 2. Remote check — ping the API server
     if (apiUrl) {
@@ -54,4 +57,3 @@ export async function POST(req) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }
 }
-

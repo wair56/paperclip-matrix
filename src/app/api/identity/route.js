@@ -6,6 +6,10 @@ import os from 'os';
 import { getNodeSettings } from '@/lib/nodeSettings';
 import { DATA_DIR } from '@/lib/paths';
 import getDb from '@/lib/db';
+import { isSupportedPaperclipRole, getUnsupportedPaperclipRoleMessage } from '@/lib/paperclipRoles';
+import { getExecutorAdapterType } from '@/lib/executors';
+import { parseEnvText } from '@/lib/cliEnv';
+import { buildIdentityEnvStorage, resolveIdentityLocalEnv } from '@/lib/identityEnv';
 
 const isValidRoleName = (name) => /^[a-zA-Z0-9_-]+$/.test(name);
 
@@ -21,9 +25,12 @@ export async function GET() {
       agentId: row.agentId || '',
       apiUrl: row.apiUrl || '',
       companyId: row.companyId || '',
-      executor: row.executor || 'claude',
+      executor: row.executor || 'claude-local',
       model: row.model || '',
       timeoutMs: row.timeoutMs || 1800000,
+      isRunning: row.isActive === 1,
+      envText: buildIdentityEnvStorage({ row }).localEnvText,
+      localEnvKeyCount: Object.keys(resolveIdentityLocalEnv(row)).length,
     });
 
     const identities = rows.filter(r => r.status === 'active' && !r.role.startsWith('_')).map(mapRow);
@@ -52,6 +59,10 @@ export async function POST(req) {
       return NextResponse.json({ success: false, error: "Invalid role name. Only alphanumeric, hyphens, and underscores allowed." }, { status: 400 });
     }
 
+    if (!isSupportedPaperclipRole(roleName)) {
+      return NextResponse.json({ success: false, error: getUnsupportedPaperclipRoleMessage(roleName) }, { status: 400 });
+    }
+
     const db = getDb();
     const company = db.prepare(`SELECT * FROM companies WHERE id = ?`).get(companyId);
     
@@ -78,7 +89,7 @@ export async function POST(req) {
       adapterConfig.env = envOverrides;
     }
     
-    let remoteAdapterType = (executor || "claude_local").replace(/-/g, '_');
+    let remoteAdapterType = getExecutorAdapterType(executor || 'claude-local');
     if (nodeSettings.frp?.serverAddr && nodeSettings.frp?.remotePort) {
        remoteAdapterType = "http";
        adapterConfig.url = `http://${nodeSettings.frp.serverAddr}:${nodeSettings.frp.remotePort}/api/webhook/paperclip`;
@@ -134,7 +145,7 @@ export async function POST(req) {
       agent.id,
       url,
       companyId,
-      executor || 'claude',
+      executor || 'claude-local',
       model || null,
       timeoutMs,
       apiKey
@@ -158,7 +169,8 @@ export async function POST(req) {
 
 export async function PATCH(req) {
   try {
-    const { role, name, executor, model } = await req.json();
+    const payload = await req.json();
+    const { role, name, executor, model, envText } = payload;
     if (!role || !isValidRoleName(role)) {
       return NextResponse.json({ success: false, error: "Role is required and must be valid." }, { status: 400 });
     }
@@ -170,27 +182,61 @@ export async function PATCH(req) {
       return NextResponse.json({ success: false, error: `Identity ${role} not found.` }, { status: 404 });
     }
 
-    db.prepare(`UPDATE identities SET name = COALESCE(?, name), executor = COALESCE(?, executor), model = COALESCE(?, model) WHERE role = ?`).run(
-      name || null,
-      executor || null, 
-      model || null, 
+    const nextName = Object.prototype.hasOwnProperty.call(payload, 'name') ? name : existing.name;
+    const nextExecutor = Object.prototype.hasOwnProperty.call(payload, 'executor') ? executor : existing.executor;
+    const nextModel = Object.prototype.hasOwnProperty.call(payload, 'model') ? model : existing.model;
+    const parsedEnvText = Object.prototype.hasOwnProperty.call(payload, 'envText')
+      ? parseEnvText(envText || '')
+      : null;
+    const nextLocalEnv = parsedEnvText?.envVars || null;
+    const nextEnvStorage = buildIdentityEnvStorage({
+      row: existing,
+      nextLocalEnv,
+    });
+
+    db.prepare(`UPDATE identities SET name = ?, executor = ?, model = ?, localEnvJson = ?, envJson = ? WHERE role = ?`).run(
+      nextName,
+      nextExecutor,
+      nextModel,
+      nextEnvStorage.localEnvJson,
+      nextEnvStorage.envJson,
       role
     );
 
-    // Active Cloud Sync for dynamic properties like Name
-    if (name && existing.companyId && existing.agentId) {
+    // Active Cloud Sync for dynamic properties like name/executor/model
+    if (existing.companyId && existing.agentId) {
       const company = db.prepare(`SELECT boardKey FROM companies WHERE id = ?`).get(existing.companyId);
       if (company && company.boardKey) {
-        // Fire and forget; do not block response
-        fetch(`${existing.apiUrl}/api/agents/${existing.agentId}`, {
-          method: "PATCH",
-          headers: { "Authorization": `Bearer ${company.boardKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ name })
-        }).catch(e => console.error(`[Matrix-API] Failed to actively sync name change to Cloud:`, e));
+        const patchBody = {};
+        if (Object.prototype.hasOwnProperty.call(payload, 'name')) {
+          patchBody.name = nextName;
+        }
+        if (Object.prototype.hasOwnProperty.call(payload, 'executor')) {
+          patchBody.adapterType = getExecutorAdapterType(nextExecutor || 'claude-local');
+        }
+        if (Object.prototype.hasOwnProperty.call(payload, 'model')) {
+          patchBody.adapterConfig = {
+            model: nextModel || 'auto',
+          };
+        }
+
+        if (Object.keys(patchBody).length > 0) {
+          // Fire and forget; do not block response
+          fetch(`${existing.apiUrl}/api/agents/${existing.agentId}`, {
+            method: "PATCH",
+            headers: { "Authorization": `Bearer ${company.boardKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify(patchBody)
+          }).catch(e => console.error(`[Matrix-API] Failed to actively sync identity changes to Cloud:`, e));
+        }
       }
     }
 
-    return NextResponse.json({ success: true, message: `Updated ${role}` });
+    return NextResponse.json({
+      success: true,
+      message: `Updated ${role}`,
+      warnings: parsedEnvText?.errors || [],
+      envText: nextEnvStorage.localEnvText,
+    });
   } catch (error) {
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
   }

@@ -3,6 +3,7 @@ import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync } from 'fs';
 import path from 'path';
 import { DATA_DIR, WORKSPACES_DIR } from '@/lib/paths';
+import { getWorkspacePathForRole } from '@/lib/workspaces';
 
 const ARCHIVES_DIR = path.join(DATA_DIR, 'archives');
 if (!existsSync(ARCHIVES_DIR)) mkdirSync(ARCHIVES_DIR, { recursive: true });
@@ -15,7 +16,7 @@ export async function POST(req) {
             return NextResponse.json({ success: false, error: "Role is required for backup." }, { status: 400 });
         }
 
-        const sourceDir = path.join(WORKSPACES_DIR, role);
+        const sourceDir = getWorkspacePathForRole(role);
         if (!existsSync(sourceDir)) {
             return NextResponse.json({ success: false, error: `Workspace for role ${role} not found.` }, { status: 404 });
         }
@@ -29,8 +30,8 @@ export async function POST(req) {
             "--exclude=node_modules",
             "--exclude=.git",
             "--exclude=.DS_Store",
-            "-C", WORKSPACES_DIR,
-            role
+            "-C", path.dirname(sourceDir),
+            path.basename(sourceDir)
         ];
 
         const result = spawnSync("tar", cmdArgs, { encoding: "utf8" });

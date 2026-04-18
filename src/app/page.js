@@ -4,6 +4,7 @@ import AgentCard from '@/components/AgentCard';
 import LogViewer from '@/components/LogViewer';
 import TelemetryGauge from '@/components/TelemetryGauge';
 import GlobalRunViewer from '@/components/GlobalRunViewer';
+import { parseEnvText } from '@/lib/cliEnv';
 
 export default function Dashboard() {
   const [identities, setIdentities] = useState([]);
@@ -24,12 +25,12 @@ export default function Dashboard() {
   const [newCompany, setNewCompany] = useState({ id: '', name: '', apiUrl: 'https://api.cowork.is', boardKey: '' });
   const [editingCompany, setEditingCompany] = useState(null);
 
-  const [nodeSettings, setNodeSettings] = useState({ frp: {}, proxy: {} });
+  const [nodeSettings, setNodeSettings] = useState({ frp: {}, proxy: {}, cli: { envText: '' } });
   const [frpStatus, setFrpStatus] = useState({ isRunning: false, pid: null });
   const [isDeployingFrp, setIsDeployingFrp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  const [role, setRole] = useState('manager');
+  const [role, setRole] = useState('general');
   const [agentName, setAgentName] = useState('');
   const [executor, setExecutor] = useState('claude-local');
   const [newModel, setNewModel] = useState('');
@@ -54,6 +55,7 @@ export default function Dashboard() {
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [inspectingAgent, setInspectingAgent] = useState(null);
   const [templateSelections, setTemplateSelections] = useState({});
+  const [provisionModels, setProvisionModels] = useState([]);
 
   const fetchIdentities = useCallback(async () => {
     try {
@@ -62,6 +64,13 @@ export default function Dashboard() {
       if (data.success) {
         setIdentities(data.identities);
         setRetiredIdentities(data.retiredIdentities || []);
+        
+        // Populate running workers set from server-side status
+        const currentlyRunning = new Set();
+        data.identities.forEach(id => {
+          if (id.isRunning) currentlyRunning.add(id.role);
+        });
+        setRunningWorkers(currentlyRunning);
       }
     } catch (err) { console.error('Identity fetch failed:', err); }
   }, []);
@@ -145,19 +154,21 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [fetchIdentities, fetchCompanies, fetchNodeSettings, fetchFrpStatus, fetchSysinfo, fetchLiveRuns, executor]);
 
-  // Load available templates into the dropdown list exactly once implicitly via handleDiscover
   useEffect(() => {
-    if (selectedCompanyId && availableTemplates.length === 0) {
-      handleDiscover();
-    }
-  }, [selectedCompanyId]);
+    const interval = setInterval(() => {
+      fetchIdentities();
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [fetchIdentities]);
 
-
+  // Load available templates into the dropdown list exactly once implicitly via handleDiscover
   const [toast, setToast] = useState(null);
   const showToast = useCallback((message, isError = false) => {
     setToast({ message, isError });
     setTimeout(() => setToast(null), 3000);
   }, []);
+  const parsedCliEnv = parseEnvText(nodeSettings.cli?.envText || '');
+  const configuredCliKeys = Object.keys(parsedCliEnv.envVars);
 
   const handleEditSave = async (e) => {
     e.stopPropagation();
@@ -286,7 +297,7 @@ export default function Dashboard() {
 
   const [discoverError, setDiscoverError] = useState('');
 
-  const handleDiscover = async (tid) => {
+  const handleDiscover = useCallback(async (tid) => {
     const activeTid = tid !== undefined ? tid : selectedTemplateId;
     if (!selectedCompanyId) {
       setDiscoverError("Please select a Company first.");
@@ -320,7 +331,36 @@ export default function Dashboard() {
       }
     } catch (err) { setDiscoverError(err.message); }
     setDiscovering(false);
-  };
+  }, [selectedCompanyId, selectedTemplateId, showTemplateModal]);
+
+  useEffect(() => {
+    if (selectedCompanyId && availableTemplates.length === 0) {
+      handleDiscover();
+    }
+  }, [selectedCompanyId, availableTemplates.length, handleDiscover]);
+
+  useEffect(() => {
+    const fetchProvisionModels = async () => {
+      if (!executor) {
+        setProvisionModels([]);
+        return;
+      }
+      try {
+        const res = await fetch('/api/adapters/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ adapter: executor }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          setProvisionModels(data.models || []);
+        }
+      } catch (err) {
+        console.error('Failed to fetch provision models:', err);
+      }
+    };
+    fetchProvisionModels();
+  }, [executor]);
 
   const handleBulkDeploy = async () => {
     if (!selectedCompanyId) return showToast("Select a company first.", true);
@@ -536,7 +576,7 @@ export default function Dashboard() {
       {/* ── Global Tasks History ── */}
       {showGlobalRuns && (
         <section className="glass-panel" style={{ marginBottom: 'var(--space-xl)', overflow: 'hidden' }}>
-          <GlobalRunViewer />
+          <GlobalRunViewer companies={companies} identities={identities} />
         </section>
       )}
 
@@ -548,7 +588,7 @@ export default function Dashboard() {
             const res = await fetch('/api/adapters/status', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ adapter: adapterName }),
+              body: JSON.stringify({ adapter: adapterName, includeQuota: true }),
             });
             const data = await res.json();
             if (data.success) {
@@ -592,6 +632,63 @@ export default function Dashboard() {
                   }
                 } catch (e) { showToast('Refresh failed', true); }
               }}>⟳ Re-detect</button>
+            </div>
+          </div>
+          <div style={{ marginBottom: 'var(--space-lg)', padding: 'var(--space-lg)', borderRadius: 'var(--radius-lg)', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)' }}>
+            <div className="flex items-center justify-between" style={{ marginBottom: 'var(--space-sm)', gap: 'var(--space-md)', flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>CLI Runtime Config</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  这里配置的 KEY=VALUE 会注入到本地 webhook / identity test 沙箱。适合补 CODEX_API_KEY、ANTHROPIC_API_KEY、OPENAI_API_KEY 等。
+                </div>
+              </div>
+              <div className="flex items-center gap-sm" style={{ flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 'var(--radius-lg)', background: configuredCliKeys.length > 0 ? 'rgba(52,211,153,0.12)' : 'var(--bg-base)', color: configuredCliKeys.length > 0 ? 'var(--status-ok)' : 'var(--text-muted)' }}>
+                  Runtime Keys: {configuredCliKeys.length}
+                </span>
+                {parsedCliEnv.errors.length > 0 && (
+                  <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 'var(--radius-lg)', background: 'rgba(248,113,113,0.12)', color: 'var(--status-err)' }}>
+                    {parsedCliEnv.errors.length} 行格式异常
+                  </span>
+                )}
+              </div>
+            </div>
+            <textarea
+              value={nodeSettings.cli?.envText || ''}
+              onChange={e => setNodeSettings(prev => ({ ...prev, cli: { ...prev.cli, envText: e.target.value } }))}
+              placeholder={'CODEX_API_KEY=...\nANTHROPIC_API_KEY=...\nOPENAI_API_KEY=...'}
+              style={{ width: '100%', minHeight: 110, padding: '10px 12px', fontSize: 12, fontFamily: 'monospace', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-interactive)', background: 'var(--bg-base)', marginBottom: 'var(--space-sm)', resize: 'vertical' }}
+            />
+            <div className="flex items-center justify-between" style={{ gap: 'var(--space-md)', flexWrap: 'wrap' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                {configuredCliKeys.length > 0 ? `已配置：${configuredCliKeys.join(', ')}` : '暂未配置全局 runtime key'}
+              </div>
+              <button
+                className="btn-outline"
+                onClick={async () => {
+                  try {
+                    const res = await fetch('/api/node-settings', {
+                      method: 'POST',
+                      body: JSON.stringify({ cli: nodeSettings.cli }),
+                    });
+                    const data = await res.json();
+                    if (!data.success) {
+                      showToast(`保存失败: ${data.error}`, true);
+                      return;
+                    }
+                    if (data.settings) setNodeSettings(data.settings);
+                    if (data.warnings?.length > 0) {
+                      showToast(`已保存，但有 ${data.warnings.length} 行格式无法解析`, true);
+                    } else {
+                      showToast('CLI runtime config 已保存并会用于后续本地执行。', false);
+                    }
+                  } catch (e) {
+                    showToast(`保存失败: ${e.message}`, true);
+                  }
+                }}
+              >
+                Save Runtime Config
+              </button>
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: 'var(--space-md)' }}>
@@ -698,11 +795,110 @@ export default function Dashboard() {
                             Base URL: {st.config.baseUrl}
                           </div>
                         )}
+                        {st.config.envKey && (
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                            Runtime key: {st.config.envKey}
+                          </div>
+                        )}
+                        {st.config.wireApi && (
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                            Wire API: {st.config.wireApi}
+                          </div>
+                        )}
                         {st.config.maxTurns && (
                           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Max turns: {st.config.maxTurns}</div>
                         )}
                         {st.config.authType && (
                           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Auth: {st.config.authType}</div>
+                        )}
+                      </div>
+                    )}
+                    {st.runtimeHealth && (
+                      <div style={{ marginTop: 'var(--space-sm)', borderTop: '1px solid var(--border-subtle)', paddingTop: 'var(--space-sm)' }}>
+                        <div className="flex items-center gap-sm" style={{ marginBottom: 'var(--space-xs)', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 70 }}>Runtime:</span>
+                          <span style={{
+                            fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 'var(--radius-sm)', textTransform: 'uppercase', letterSpacing: '0.5px',
+                            background: st.runtimeHealth.status === 'ready'
+                              ? 'rgba(52,211,153,0.12)'
+                              : st.runtimeHealth.status === 'warning'
+                                ? 'rgba(251,191,36,0.12)'
+                                : 'rgba(248,113,113,0.12)',
+                            color: st.runtimeHealth.status === 'ready'
+                              ? 'var(--status-ok)'
+                              : st.runtimeHealth.status === 'warning'
+                                ? 'var(--status-warn)'
+                                : 'var(--status-err)',
+                          }}>
+                            {st.runtimeHealth.status === 'ready' ? 'Ready' : st.runtimeHealth.status === 'warning' ? 'Warn' : st.runtimeHealth.status === 'needs_config' ? 'Need Config' : 'Info'}
+                          </span>
+                          <span style={{ fontSize: 11, color: 'var(--text-secondary)', flex: 1, minWidth: 0 }}>
+                            {st.runtimeHealth.summary || '—'}
+                          </span>
+                        </div>
+                        {st.runtimeHealth.envChecks?.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 'var(--space-xs)' }}>
+                            {st.runtimeHealth.envChecks.map(entry => (
+                              <span key={entry.key} style={{
+                                fontSize: 10, padding: '3px 6px', borderRadius: 'var(--radius-sm)',
+                                background: entry.runtimeConfigured ? 'rgba(52,211,153,0.08)' : 'rgba(248,113,113,0.08)',
+                                border: `1px solid ${entry.runtimeConfigured ? 'rgba(52,211,153,0.35)' : 'rgba(248,113,113,0.35)'}`,
+                                color: entry.runtimeConfigured ? 'var(--status-ok)' : 'var(--status-err)',
+                                fontFamily: 'monospace',
+                              }} title={`dashboard:${entry.dashboardConfigured ? 'yes' : 'no'} / node:${entry.processConfigured ? 'yes' : 'no'} / shell:${entry.shellConfigured ? 'yes' : 'no'}`}>
+                                {entry.key}
+                                {entry.dashboardConfigured ? ' · UI' : ''}
+                                {entry.processConfigured ? ' · Node' : ''}
+                                {entry.shellConfigured ? ' · Shell' : ''}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {st.runtimeHealth.setupHints?.length > 0 && (
+                          <ul style={{ margin: '8px 0 0 18px', padding: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                            {st.runtimeHealth.setupHints.slice(0, 3).map((hint, idx) => (
+                              <li key={idx}>{hint}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                    {st.quota?.supported && (
+                      <div style={{ marginTop: 'var(--space-sm)', borderTop: '1px solid var(--border-subtle)', paddingTop: 'var(--space-sm)' }}>
+                        <div className="flex items-center gap-sm" style={{ marginBottom: 'var(--space-xs)', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 70 }}>Quota:</span>
+                          <span style={{
+                            fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 'var(--radius-sm)',
+                            background: st.quota.ok ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)',
+                            color: st.quota.ok ? 'var(--status-ok)' : 'var(--status-err)',
+                          }}>
+                            {st.quota.ok ? 'LIVE' : 'N/A'}
+                          </span>
+                          <span style={{ fontSize: 11, color: 'var(--text-secondary)', flex: 1, minWidth: 0 }}>
+                            {st.quota.summary || st.quota.error || 'No quota data'}
+                          </span>
+                        </div>
+                        {st.quota.account && Object.values(st.quota.account).some(Boolean) && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 'var(--space-xs)' }}>
+                            {Object.entries(st.quota.account).map(([key, value]) => value ? (
+                              <span key={key} style={{ fontSize: 10, padding: '2px 6px', borderRadius: 'var(--radius-sm)', background: 'var(--bg-base)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}>
+                                {key}: {value}
+                              </span>
+                            ) : null)}
+                          </div>
+                        )}
+                        {st.quota.windows?.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                            {st.quota.windows.map((window, idx) => (
+                              <span key={`${window.label}-${idx}`} style={{
+                                fontSize: 10, padding: '3px 6px', borderRadius: 'var(--radius-sm)',
+                                background: 'var(--bg-base)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)',
+                              }}>
+                                {window.label}: {window.valueLabel || (window.usedPercent != null ? `${window.usedPercent}%` : '—')}
+                                {window.resetLabel ? ` · reset ${window.resetLabel}` : ''}
+                              </span>
+                            ))}
+                          </div>
                         )}
                       </div>
                     )}
@@ -819,7 +1015,7 @@ export default function Dashboard() {
                <span style={{ fontSize: 11, background: 'var(--border-subtle)', color: 'var(--text-muted)', padding: '2px 8px', borderRadius: 'var(--radius-lg)' }}>⚫ OFFLINE</span>
             )}
           </h2>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-xl)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-xl)', marginBottom: 'var(--space-lg)' }}>
             <div>
               <h3 style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 'var(--space-sm)' }}>FRP Ingress Tunnel (TCP)</h3>
               <div style={{ display: 'flex', gap: 'var(--space-sm)', marginBottom: 'var(--space-xs)' }}>
@@ -891,6 +1087,29 @@ export default function Dashboard() {
               </button>
             </div>
           </div>
+          
+          <div style={{ borderTop: '1px solid var(--border-default)', paddingTop: 'var(--space-lg)' }}>
+            <h3 style={{ fontSize: 14, color: 'var(--accent)', marginBottom: 'var(--space-sm)' }}>Global Override Rules</h3>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 'var(--space-md)' }}>
+              These instructions are injected at the bottom of the System Prompt for EVERY agent running on this node. Use this to enforce headless behavior or disable specific tools (e.g., &quot;DO NOT use clarify&quot;).
+            </p>
+            <textarea
+              value={nodeSettings.agentRules?.globalPrompt || ''}
+              onChange={e => setNodeSettings({ ...nodeSettings, agentRules: { ...nodeSettings.agentRules, globalPrompt: e.target.value } })}
+              placeholder="e.g. You are running headlessly. DO NOT use interactive CLI tools to ask clarifying questions. You MUST use the Paperclip Issue Comment script/tool to post responses directly."
+              style={{ width: '100%', minHeight: '80px', padding: '10px', fontSize: 13, fontFamily: 'monospace', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-interactive)', background: 'var(--bg-base)', marginBottom: 'var(--space-sm)', resize: 'vertical' }}
+            />
+            <button 
+              onClick={async () => {
+                await fetch('/api/node-settings', { method: 'POST', body: JSON.stringify(nodeSettings) });
+                showToast('Global rules updated successfully.');
+              }} 
+              className="btn-outline"
+            >
+              Save Global Rules
+            </button>
+          </div>
+
         </section>
       )}
 
@@ -1078,11 +1297,11 @@ export default function Dashboard() {
                         <label>LLM Model</label>
                         <select value={newModel} onChange={e => setNewModel(e.target.value)}>
                           <option value="">auto (Default)</option>
-                          <option value="claude-sonnet-4-20250514">claude-sonnet-4</option>
-                          <option value="claude-opus-4-20250514">claude-opus-4</option>
-                          <option value="gpt-5.4">gpt-5.4</option>
-                          <option value="o3">o3</option>
-                          <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                          {provisionModels.map((model) => (
+                            <option key={model.id} value={model.id}>
+                              {model.label || model.id}
+                            </option>
+                          ))}
                         </select>
                       </div>
                       <button type="submit" className="btn-outline" disabled={loading} style={{ marginTop: 'var(--space-xs)', borderColor: loading ? 'var(--border-subtle)' : 'var(--accent)', color: 'var(--accent)' }}>
