@@ -22,13 +22,29 @@ export async function POST(req) {
       return NextResponse.json({ success: false, error: 'Role is required to start a worker.' }, { status: 400 });
     }
 
-    if (activeWorkers.has(role)) {
-      return NextResponse.json({ success: false, error: `Worker ${role} is already running.` }, { status: 409 });
+    const db = getDb();
+    const identity = db.prepare(`SELECT name, agentId, apiUrl, companyId, envJson, localEnvJson, cloudEnvJson, isActive FROM identities WHERE role = ? AND status = 'active'`).get(role);
+    if (!identity) {
+      return NextResponse.json({ success: false, error: `Identity ${role} not found or not active.` }, { status: 404 });
+    }
+
+    if (activeWorkers.has(role) || identity.isActive === 1) {
+      const virtualPid = activeWorkers.get(role) || Date.now();
+      activeWorkers.set(role, virtualPid);
+      if (identity.isActive !== 1) {
+        try {
+          db.prepare(`UPDATE identities SET isActive = 1 WHERE role = ?`).run(role);
+        } catch {}
+      }
+      return NextResponse.json({
+        success: true,
+        alreadyRunning: true,
+        message: `Worker [${role}] is already armed for webhook traffic.`,
+        pid: virtualPid,
+      });
     }
 
     // 0. Securely pull latest Identity keys/variables from the Cloud before Sandboxing
-    const db = getDb();
-    const identity = db.prepare(`SELECT name, agentId, apiUrl, companyId, envJson, localEnvJson, cloudEnvJson FROM identities WHERE role = ? AND status = 'active'`).get(role);
     if (identity && identity.agentId && identity.companyId) {
       const company = db.prepare(`SELECT boardKey FROM companies WHERE id = ?`).get(identity.companyId);
       if (company && company.boardKey) {
@@ -141,13 +157,13 @@ export async function DELETE(req) {
   try {
     const { role } = await req.json();
     const wasTracked = activeWorkers.has(role);
+    const db = getDb();
     
     // Virtual PID (Date.now()) is not a real process — just remove from tracking map.
     // Do NOT call process.kill() on it.
     activeWorkers.delete(role);
 
     // Persist stopped state to DB
-    const db = getDb();
     try {
       db.prepare(`UPDATE identities SET isActive = 0 WHERE role = ?`).run(role);
     } catch(e) { console.warn('[Matrix-Orchestrator] Could not clear isActive state:', e.message); }

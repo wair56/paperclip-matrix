@@ -137,13 +137,6 @@ export function getDb() {
     console.error("[Matrix-DB] Startup cleanup failed:", e.message);
   }
 
-  // Worker state is virtual/in-memory; clear stale persisted flags on boot.
-  try {
-    db.prepare(`UPDATE identities SET isActive = 0 WHERE isActive = 1`).run();
-  } catch (e) {
-    console.error("[Matrix-DB] Worker state cleanup failed:", e.message);
-  }
-
   return db;
 }
 

@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import { getNodeSettings } from './nodeSettings';
 import { DATA_DIR, BIN_DIR } from './paths';
+import { getAppPort } from './runtime';
 
 const isWin = os.platform() === 'win32';
 const FRP_BIN = path.join(BIN_DIR, isWin ? 'frpc.exe' : 'frpc');
@@ -88,6 +89,7 @@ export async function stopFrp() {
 export async function startFrp(settings) {
   await stopFrp();
   await ensureFrpInstalled();
+  const localPort = getAppPort();
 
   // Generate toml
   const tomlContent = `
@@ -100,7 +102,7 @@ auth.token = "${settings.token}"
 name = "matrix-webhook-tcp"
 type = "tcp"
 localIP = "127.0.0.1"
-localPort = 3000
+localPort = ${localPort}
 remotePort = ${settings.remotePort}
 `;
   writeFileSync(TOML_FILE, tomlContent.trim(), 'utf8');

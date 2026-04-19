@@ -6,6 +6,10 @@
     "dev": "bun --bun next dev",
     "build": "bun --bun next build",
     "start": "bun --bun next start",
+    "stable:start": "node scripts/matrix-server.mjs start",
+    "stable:stop": "node scripts/matrix-server.mjs stop",
+    "stable:status": "node scripts/matrix-server.mjs status",
+    "stable:restart": "node scripts/matrix-server.mjs restart",
     "lint": "eslint",
     "test:smoke": "bun scripts/regression-smoke.mjs",
     "test:cli-smoke": "bun scripts/cli-flag-smoke.mjs"
