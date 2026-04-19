@@ -10,9 +10,16 @@ const PID_FILE = path.join(DATA_DIR, 'matrix-server.pid');
 const LOG_FILE = path.join(LOGS_DIR, 'matrix-server.log');
 const PORT = String(process.env.MATRIX_APP_PORT || process.env.PORT || 3010);
 const HOST = String(process.env.MATRIX_APP_HOST || '127.0.0.1');
+const SERVER_BASE_URL = `http://${HOST}:${PORT}`;
+const STARTUP_TIMEOUT_MS = 30000;
+const STARTUP_POLL_MS = 500;
 
 for (const dir of [DATA_DIR, LOGS_DIR]) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isPidRunning(pid) {
@@ -78,9 +85,50 @@ function ensureBuild() {
   }
 }
 
-function startServer() {
+async function waitForServerReady() {
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  let lastError = null;
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${SERVER_BASE_URL}/api/identity`, {
+        headers: { accept: 'application/json' },
+      });
+      if (res.ok) return true;
+      lastError = new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await sleep(STARTUP_POLL_MS);
+  }
+
+  throw lastError || new Error('Timed out waiting for server readiness');
+}
+
+async function requestFrpAction(action) {
+  try {
+    const res = await fetch(`${SERVER_BASE_URL}/api/frp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      console.warn(`[matrix-server] FRP ${action} skipped: ${res.status}${text ? ` ${text}` : ''}`);
+      return false;
+    }
+    console.log(`[matrix-server] FRP ${action} ok${text ? `: ${text}` : ''}`);
+    return true;
+  } catch (error) {
+    console.warn(`[matrix-server] FRP ${action} failed: ${error?.message || String(error)}`);
+    return false;
+  }
+}
+
+async function startServer() {
   const existing = readTrackedPid();
   if (existing && isPidRunning(existing)) {
+    await requestFrpAction('start');
     console.log(JSON.stringify({ ok: true, alreadyRunning: true, pid: existing, host: HOST, port: Number(PORT) }));
     return;
   }
@@ -104,6 +152,9 @@ function startServer() {
 
   child.unref();
   writePidFile(child.pid);
+
+  await waitForServerReady();
+  await requestFrpAction('start');
 
   console.log(JSON.stringify({
     ok: true,
@@ -133,14 +184,14 @@ const command = process.argv[2] || 'status';
 
 switch (command) {
   case 'start':
-    startServer();
+    await startServer();
     break;
   case 'stop':
     console.log(JSON.stringify({ ok: true, ...stopTrackedProcess() }));
     break;
   case 'restart':
     stopTrackedProcess();
-    startServer();
+    await startServer();
     break;
   case 'status':
     printStatus();

@@ -364,6 +364,7 @@ async function testIdentityProvisionAndPatch(db, prefix) {
     const createPayload = await readJson(createResponse);
     assert(createPayload?.success === true, "identity create should succeed");
     assert(createPayload?.agentId === `${prefix}-remote-agent`, "identity create should return remote agent id");
+    const localRole = createPayload?.role || "general";
 
     const createAgentCall = fetchCalls.find((call) => call.url.endsWith(`/api/companies/${companyId}/agents`));
     assert(createAgentCall?.body?.adapterType === "opencode_local", "identity create should map executor to adapter type");
@@ -372,7 +373,7 @@ async function testIdentityProvisionAndPatch(db, prefix) {
       "identity create should normalize OpenCode model names",
     );
     assert(
-      db.prepare(`SELECT executor, model, apiKey FROM identities WHERE role = 'general' AND agentId = ?`).get(`${prefix}-remote-agent`)?.model === "gpt-5.4",
+      db.prepare(`SELECT executor, model, apiKey FROM identities WHERE role = ? AND agentId = ?`).get(localRole, `${prefix}-remote-agent`)?.model === "gpt-5.4",
       "identity create should persist local model",
     );
 
@@ -382,7 +383,7 @@ async function testIdentityProvisionAndPatch(db, prefix) {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          role: "general",
+          role: localRole,
           executor: "codex-local",
           model: "gpt-5.4",
           name: `${prefix}-Renamed`,
@@ -402,14 +403,14 @@ async function testIdentityProvisionAndPatch(db, prefix) {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          role: "general",
+          role: localRole,
           envText: `CODEX_API_KEY=${prefix}-codex\nFEATURE_FLAG=1`,
         }),
       }),
     );
     const envPatchPayload = await readJson(envPatchResponse);
     assert(envPatchPayload?.success === true, "identity patch should accept local env text");
-    const envRow = db.prepare(`SELECT envJson, localEnvJson FROM identities WHERE role = 'general'`).get();
+    const envRow = db.prepare(`SELECT envJson, localEnvJson FROM identities WHERE role = ?`).get(localRole);
     assert(JSON.parse(envRow?.localEnvJson || "{}")?.CODEX_API_KEY === `${prefix}-codex`, "identity patch should persist localEnvJson");
     assert(JSON.parse(envRow?.envJson || "{}")?.FEATURE_FLAG === "1", "identity patch should keep merged envJson in sync");
 
@@ -713,6 +714,7 @@ async function testGlobalCliRuntimeEnv(db, prefix) {
     proxy: { ...originalSettings.proxy, httpsProxy: "http://127.0.0.1:18888", openaiBaseUrl: "https://example.invalid/v1" },
     cli: {
       ...(originalSettings.cli || {}),
+      envVars: {},
       envText: `CODEX_API_KEY=${prefix}-codex-key\nGLOBAL_ONLY=${prefix}-global`,
     },
   });
