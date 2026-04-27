@@ -6,6 +6,16 @@ import { DB_FILE } from './paths';
 
 let db = null;
 
+function shouldMarkStaleRunsOnStartup() {
+  if (process.env.MATRIX_MARK_STALE_RUNS_ON_STARTUP === 'true') return true;
+  if (process.env.MATRIX_SKIP_STARTUP_CLEANUP === 'true') return false;
+  const argv = process.argv.join(' ');
+  // Only the long-lived Matrix web server should perform this cleanup.
+  // Short-lived scripts/tests also import getDb(); if they run this cleanup
+  // against the production DB, they can incorrectly interrupt active tasks.
+  return /\bnext\b/.test(argv) && /\bstart\b/.test(argv);
+}
+
 export function getDb() {
   if (db) return db;
 
@@ -130,11 +140,13 @@ export function getDb() {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_agent_receivedAt ON task_runs(agentId, receivedAt DESC);`);
   } catch (e) {}
 
-  // Startup Cleanup: Mark any tasks stuck in 'running' as interrupted (since process handles are lost)
-  try {
-    db.prepare(`UPDATE task_runs SET status = 'interrupted', response = 'Task was interrupted by server restart' WHERE status = 'running'`).run();
-  } catch (e) {
-    console.error("[Matrix-DB] Startup cleanup failed:", e.message);
+  if (shouldMarkStaleRunsOnStartup()) {
+    // Startup Cleanup: Mark any tasks stuck in 'running' as interrupted (since process handles are lost)
+    try {
+      db.prepare(`UPDATE task_runs SET status = 'interrupted', response = 'Task was interrupted by server restart' WHERE status = 'running'`).run();
+    } catch (e) {
+      console.error("[Matrix-DB] Startup cleanup failed:", e.message);
+    }
   }
 
   return db;

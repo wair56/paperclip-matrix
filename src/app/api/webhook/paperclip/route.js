@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { existsSync, createWriteStream } from 'fs';
+import { existsSync, createWriteStream, mkdirSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
 import path from 'path';
 import { getNodeSettings } from '@/lib/nodeSettings';
@@ -125,9 +125,58 @@ function cleanAgentResponse(raw) {
   return collapseBlankLines(dedupeParagraphs(filtered));
 }
 
+
+function extractAgentMessageText(raw) {
+  const text = String(raw || '').replace(/\r\n?/g, '\n');
+  const messages = [];
+
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('{')) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (event?.type === 'agent_message' && typeof event.text === 'string') {
+        messages.push(event.text);
+      } else if (event?.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
+        messages.push(event.item.text);
+      } else if (event?.type === 'message' && typeof event.content === 'string') {
+        messages.push(event.content);
+      } else if (event?.type === 'result' && typeof event.text === 'string') {
+        messages.push(event.text);
+      }
+    } catch {}
+  }
+
+  return collapseBlankLines(messages.join('\n\n'));
+}
+
+function looksLikeRawExecutionJsonl(text) {
+  const lines = String(text || '').split('\n').filter((line) => line.trim());
+  return lines.length > 1 && lines.filter((line) => line.trim().startsWith('{')).length >= Math.min(3, lines.length);
+}
+
+function buildRemoteResponse(raw, status) {
+  const agentText = extractAgentMessageText(raw);
+  if (agentText) return cleanAgentResponse(agentText);
+
+  const cleaned = cleanAgentResponse(raw);
+  if (!cleaned) return status === 'completed' ? '任务已完成。' : '任务执行失败，请查看运行日志。';
+  if (looksLikeRawExecutionJsonl(cleaned)) return status === 'completed' ? '任务已完成。' : '任务执行失败，请查看运行日志。';
+  return cleaned;
+}
+
+function hasDeliverableResponse(raw, status) {
+  const cleaned = buildRemoteResponse(raw, status);
+  if (!cleaned) return false;
+  if (status === 'completed' && cleaned === '任务已完成。' && looksLikeRawExecutionJsonl(cleanAgentResponse(raw))) {
+    return false;
+  }
+  return true;
+}
+
 function buildIssueCommentBody(status, rawResponse, runId) {
   const marker = `<!-- paperclip-run:${runId} -->`;
-  const cleaned = cleanAgentResponse(rawResponse);
+  const cleaned = buildRemoteResponse(rawResponse, status);
   if (status === 'completed') {
     const body = cleaned || '任务已完成。';
     return `${body}\n\n${marker}`;
@@ -137,8 +186,9 @@ function buildIssueCommentBody(status, rawResponse, runId) {
 }
 
 function responseNeedsFollowUp(rawResponse) {
-  const cleaned = cleanAgentResponse(rawResponse);
-  if (!cleaned) return true;
+  const agentText = extractAgentMessageText(rawResponse);
+  const cleaned = cleanAgentResponse(agentText || rawResponse);
+  if (!cleaned || looksLikeRawExecutionJsonl(cleaned)) return true;
   return [
     '请提供',
     '需要确认',
@@ -161,6 +211,233 @@ function extractCommentsPayload(payload) {
   return [];
 }
 
+function normalizeIssuePayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.issue && typeof payload.issue === 'object') return payload.issue;
+  if (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)) return payload.data;
+  return payload;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchIssueDetails({ apiUrl, apiKey, issueId, logToFile }) {
+  if (!apiUrl || !apiKey || !issueId) return null;
+  let lastError = '';
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      const res = await fetch(`${apiUrl}/api/issues/${issueId}`, {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      if (res.ok) {
+        const issue = normalizeIssuePayload(await res.json().catch(() => null));
+        if (issue?.title || issue?.identifier || issue?.description) return issue;
+        lastError = 'empty issue payload';
+      } else {
+        lastError = `HTTP ${res.status}`;
+      }
+    } catch (e) {
+      lastError = e?.message || String(e);
+    }
+    await sleep(Math.min(2000, attempt * 250));
+  }
+  logToFile?.('stderr', `[Matrix-Webhook] Issue context fetch failed for ${issueId}: ${lastError}\n`);
+  return null;
+}
+
+function normalizeIssueComment(comment) {
+  if (!comment || typeof comment !== 'object') return null;
+  const body = comment.body ?? comment.text ?? comment.content ?? comment.message ?? '';
+  if (!String(body).trim()) return null;
+  return {
+    id: comment.id || comment.commentId || null,
+    body: String(body),
+    createdAt: comment.createdAt || comment.updatedAt || null,
+    actorType: comment.actorType || comment.authorType || null,
+    actorId: comment.actorId || comment.authorId || comment.userId || comment.agentId || null,
+    authorName: comment.authorName || comment.userName || comment.agentName || null,
+  };
+}
+
+async function fetchIssueComments({ apiUrl, apiKey, issueId, logToFile }) {
+  if (!apiUrl || !apiKey || !issueId) return [];
+  let lastError = '';
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const res = await fetch(`${apiUrl}/api/issues/${issueId}/comments`, {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      if (res.ok) {
+        const payload = await res.json().catch(() => []);
+        return extractCommentsPayload(payload).map(normalizeIssueComment).filter(Boolean);
+      }
+      lastError = `HTTP ${res.status}`;
+    } catch (e) {
+      lastError = e?.message || String(e);
+    }
+    await sleep(Math.min(1000, attempt * 200));
+  }
+  logToFile?.('stderr', `[Matrix-Webhook] Issue comments fetch failed for ${issueId}: ${lastError}\n`);
+  return [];
+}
+
+function pickIssueContext(body, parsedContext, fetchedIssue) {
+  const inlineIssue = normalizeIssuePayload(body?.issue || parsedContext?.issue || parsedContext?.paperclipIssue);
+  const source = { ...(fetchedIssue || {}), ...(inlineIssue || {}) };
+  return {
+    id: source.id || parsedContext?.issueId || parsedContext?.taskId || body?.issueId || null,
+    identifier: source.identifier || parsedContext?.identifier || parsedContext?.taskIdentifier || parsedContext?.taskKey || null,
+    title: source.title || parsedContext?.title || parsedContext?.taskTitle || body?.title || null,
+    description: source.description || parsedContext?.description || parsedContext?.taskDescription || body?.description || null,
+    status: source.status || null,
+    priority: source.priority || null,
+    assigneeAgentId: source.assigneeAgentId || null,
+  };
+}
+
+function hasMeaningfulIssueContext(issue) {
+  return Boolean(issue?.title || issue?.description || issue?.identifier);
+}
+
+function sanitizePathSegment(value) {
+  return String(value || 'unknown')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120) || 'unknown';
+}
+
+function getWakeCommentIds(parsedContext) {
+  return [
+    parsedContext?.wakeCommentId,
+    parsedContext?.commentId,
+    parsedContext?.paperclipWake?.latestCommentId,
+    ...(Array.isArray(parsedContext?.wakeCommentIds) ? parsedContext.wakeCommentIds : []),
+    ...(Array.isArray(parsedContext?.paperclipWake?.commentIds) ? parsedContext.paperclipWake.commentIds : []),
+  ].filter(Boolean).map(String);
+}
+
+function getInlineWakeComments(parsedContext) {
+  const comments = parsedContext?.paperclipWake?.comments;
+  return Array.isArray(comments) ? comments : [];
+}
+
+const ASYNC_ACK_TEXT = '任务已接收，正在后台执行；完成后会在本任务下回复。';
+const IGNORED_WAKE_TEXT = 'Ignored Paperclip-generated completion comment.';
+
+function isPaperclipGeneratedCommentText(text) {
+  const normalized = String(text || '').trim();
+  return /<!--\s*paperclip-run:[^>]+-->/i.test(normalized)
+    || normalized === ASYNC_ACK_TEXT
+    || normalized === IGNORED_WAKE_TEXT;
+}
+
+function hasPaperclipGeneratedWakeComment(parsedContext) {
+  return getInlineWakeComments(parsedContext).some((comment) => (
+    isPaperclipGeneratedCommentText(comment?.body || comment?.text || comment?.content || '')
+  ));
+}
+
+function hasPaperclipGeneratedTriggerComment(comments, parsedContext) {
+  if (!Array.isArray(comments) || comments.length === 0) return false;
+  const wakeIds = new Set(getWakeCommentIds(parsedContext));
+  if (wakeIds.size === 0) return false;
+  return comments.some((comment) => (
+    comment?.id
+    && wakeIds.has(String(comment.id))
+    && isPaperclipGeneratedCommentText(comment.body)
+  ));
+}
+
+function selectRelevantComments(comments, parsedContext, limit = 10) {
+  if (!Array.isArray(comments) || comments.length === 0) return [];
+  const wakeIds = new Set(getWakeCommentIds(parsedContext));
+  const withIndex = comments.map((comment, index) => ({ comment, index }));
+  const wakeComments = withIndex
+    .filter(({ comment }) => comment.id && wakeIds.has(String(comment.id)))
+    .map(({ comment }) => ({ ...comment, isTrigger: true }));
+  const wakeSeen = new Set(wakeComments.map((comment) => String(comment.id)));
+  const recentComments = withIndex
+    .filter(({ comment }) => !comment.id || !wakeSeen.has(String(comment.id)))
+    .sort((a, b) => {
+      const at = a.comment.createdAt ? Date.parse(a.comment.createdAt) : 0;
+      const bt = b.comment.createdAt ? Date.parse(b.comment.createdAt) : 0;
+      if (bt !== at) return bt - at;
+      return b.index - a.index;
+    })
+    .slice(0, Math.max(0, limit - wakeComments.length))
+    .map(({ comment }) => comment);
+  return [...wakeComments, ...recentComments].slice(0, limit);
+}
+
+function appendCommentsMarkdown(lines, comments) {
+  if (!comments?.length) return;
+  lines.push('', '## Relevant Comments');
+  comments.forEach((comment, index) => {
+    const heading = comment.isTrigger ? `Trigger Comment ${index + 1}` : `Comment ${index + 1}`;
+    lines.push('', `### ${heading}`);
+    if (comment.id) lines.push(`- ID: ${comment.id}`);
+    if (comment.createdAt) lines.push(`- Created At: ${comment.createdAt}`);
+    if (comment.authorName || comment.actorType || comment.actorId) {
+      lines.push(`- Author: ${comment.authorName || comment.actorId || comment.actorType}`);
+    }
+    lines.push('', comment.body);
+  });
+}
+
+function buildTaskContextMarkdown(issue, comments, parsedContext) {
+  const lines = [
+    '# Paperclip Task Context',
+    '',
+    'This file is the authoritative context for the current run. Ignore unrelated stale files from previous tasks unless this task explicitly asks you to use them.',
+    '',
+  ];
+  if (issue?.identifier) lines.push(`- Identifier: ${issue.identifier}`);
+  if (issue?.id) lines.push(`- Issue ID: ${issue.id}`);
+  if (issue?.title) lines.push(`- Title: ${issue.title}`);
+  if (issue?.status) lines.push(`- Status: ${issue.status}`);
+  if (issue?.priority) lines.push(`- Priority: ${issue.priority}`);
+  if (issue?.description) {
+    lines.push('', '## Description', '', String(issue.description));
+  }
+  appendCommentsMarkdown(lines, comments);
+  lines.push('', '## Raw Context', '', '```json', JSON.stringify(parsedContext || {}, null, 2), '```', '');
+  return lines.join('\n');
+}
+
+function prepareTaskWorkspace({ sandbox, roleName, issue, comments, taskId, issueId, runId, parsedContext, envVars }) {
+  const isolationDisabled = envVars.PAPERCLIP_TASK_WORKSPACE_ISOLATION === 'false';
+  const taskKey = issue?.identifier || issueId || taskId || runId;
+  const taskWorkspace = (isolationDisabled || !taskKey)
+    ? sandbox.cwd
+    : path.join(sandbox.cwd, 'tasks', sanitizePathSegment(taskKey));
+
+  mkdirSync(taskWorkspace, { recursive: true });
+  try {
+    writeFileSync(
+      path.join(taskWorkspace, 'TASK_CONTEXT.md'),
+      buildTaskContextMarkdown(issue, comments, parsedContext),
+      'utf8',
+    );
+    writeFileSync(
+      path.join(taskWorkspace, '.paperclip-task.json'),
+      JSON.stringify({ roleName, taskId, issueId, runId, issue, comments, context: parsedContext }, null, 2),
+      'utf8',
+    );
+  } catch {}
+  if (!isolationDisabled && taskKey) {
+    sandbox.cwd = taskWorkspace;
+    sandbox.env.WORK_DIR = taskWorkspace;
+  }
+  return taskWorkspace;
+}
+
 function shouldForwardTextChunk(text) {
   const trimmed = String(text || '').trim();
   if (!trimmed) return false;
@@ -168,32 +445,80 @@ function shouldForwardTextChunk(text) {
   return true;
 }
 
+function buildIgnoredWakeResponse(runId) {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'X-Paperclip-Ignored-Run': String(runId || ''),
+      'Cache-Control': 'no-cache, no-transform',
+    },
+  });
+}
+
 async function syncRunReplyToCloud({ identity, agentId, runId, status, response, code, finishedAt, logToFile }) {
-  if (!identity.apiUrl || !agentId || !identity.apiKey || !runId) return;
+  if (!identity.replyEndpoint || !agentId || !identity.apiKey || !runId) return false;
   logToFile('stdout', `[Matrix-Webhook] Sending ${status} callback to Cloud for Run ${runId}...\n`);
   try {
-    const res = await fetch(`${identity.apiUrl}/api/runs/${runId}/reply`, {
+    const res = await fetch(identity.replyEndpoint, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${identity.apiKey}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'X-Paperclip-Run-Id': runId,
       },
       body: JSON.stringify({
         status,
-        response,
+        response: buildRemoteResponse(response, status),
         exitCode: code,
         finishedAt: new Date(finishedAt).toISOString()
       })
     });
     if (res.ok) {
       logToFile('stdout', `[Matrix-Webhook] Successfully synced ${status} for Run ${runId}\n`);
+      return true;
     } else {
       const errText = await res.text().catch(() => '');
       logToFile('stderr', `[Matrix-Webhook] Cloud sync failed for Run ${runId}: ${res.status}${errText ? ` ${errText}` : ''}\n`);
+      return false;
     }
   } catch (e) {
     logToFile('stderr', `[Matrix-Webhook] Network error during Cloud sync for Run ${runId}: ${e?.message || String(e)}\n`);
+    return false;
   }
+}
+
+function pickFirstString(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim())?.trim() || null;
+}
+
+function resolveCloudReplyEndpoint({ body, parsedContext, identity, runId, runEnv }) {
+  const explicitEndpoint = pickFirstString(
+    body?.replyUrl,
+    body?.replyURL,
+    body?.replyCallbackUrl,
+    body?.replyCallbackURL,
+    body?.callbackUrl,
+    body?.callbackURL,
+    body?.callback?.url,
+    parsedContext?.replyUrl,
+    parsedContext?.replyCallbackUrl,
+    parsedContext?.callbackUrl,
+    parsedContext?.paperclipCallback?.url,
+    parsedContext?.paperclipRun?.replyUrl,
+  );
+  if (explicitEndpoint) return explicitEndpoint;
+
+  // The current hosted Paperclip API does not expose /api/runs/:id/reply.
+  // Keep the legacy URL behind an opt-in for older/self-hosted clouds only.
+  if (
+    runEnv?.PAPERCLIP_LEGACY_RUN_REPLY === 'true'
+    && identity?.apiUrl
+    && runId
+  ) {
+    return `${identity.apiUrl}/api/runs/${runId}/reply`;
+  }
+
+  return null;
 }
 
 async function ensureIssueComment({ identity, issueId, runId, status, response, logToFile }) {
@@ -205,7 +530,8 @@ async function ensureIssueComment({ identity, issueId, runId, status, response, 
     const listRes = await fetch(`${identity.apiUrl}/api/issues/${issueId}/comments`, {
       headers: {
         'Authorization': `Bearer ${identity.apiKey}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'X-Paperclip-Run-Id': runId,
       }
     });
     if (listRes.ok) {
@@ -225,7 +551,8 @@ async function ensureIssueComment({ identity, issueId, runId, status, response, 
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${identity.apiKey}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'X-Paperclip-Run-Id': runId,
       },
       body: JSON.stringify({ body })
     });
@@ -248,7 +575,8 @@ async function ensureIssueDone({ identity, issueId, runId, status, logToFile }) 
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${identity.apiKey}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        ...(runId ? { 'X-Paperclip-Run-Id': runId } : {})
       },
       body: JSON.stringify({ status: 'done' })
     });
@@ -285,6 +613,11 @@ export async function POST(req) {
     const { runId, agentId, companyId, context } = body;
     const parsedContext = parseContext(context);
     console.log(`[Matrix-Webhook] Incoming run payload for Agent ${agentId} (Run: ${runId})`);
+
+    if (hasPaperclipGeneratedWakeComment(parsedContext)) {
+      console.log(`[Matrix-Webhook] Ignoring Paperclip-generated issue comment wakeup for Run ${runId}`);
+      return buildIgnoredWakeResponse(runId);
+    }
     
     // Dump the payload for debugging keys
     require('fs').appendFileSync(
@@ -353,6 +686,30 @@ export async function POST(req) {
       envVars = JSON.parse(identity.envJson || '{}');
     } catch(e) {}
 
+    const fetchedIssue = await fetchIssueDetails({
+      apiUrl: identity.apiUrl,
+      apiKey: identity.apiKey,
+      issueId: issueId || taskId,
+    });
+    const issueComments = selectRelevantComments(
+      await fetchIssueComments({
+        apiUrl: identity.apiUrl,
+        apiKey: identity.apiKey,
+        issueId: issueId || taskId,
+      }),
+      parsedContext,
+    );
+    const issueContext = pickIssueContext(body, parsedContext, fetchedIssue);
+
+    if (hasPaperclipGeneratedTriggerComment(issueComments, parsedContext)) {
+      console.log(`[Matrix-Webhook] Ignoring fetched Paperclip-generated issue comment wakeup for Run ${runId}`);
+      try {
+        db.prepare(`UPDATE task_runs SET response = ?, repliedAt = ?, status = 'completed' WHERE runId = ?`)
+          .run('Ignored Paperclip-generated completion comment.', Date.now(), dbRunId);
+      } catch {}
+      return buildIgnoredWakeResponse(runId);
+    }
+
     // 0.2. Model & Executor Overrides (Priority: Payload > envVars > Identity Column)
     const payloadModel = body.model || body.runnerModel || parsedContext.model || null;
     const payloadExecutor = body.executor || body.runnerExecutor || parsedContext.executor || null;
@@ -362,12 +719,28 @@ export async function POST(req) {
     // 2. Use SandboxManager for isolated execution environment
     //    Use the resolved executor name
     const sandbox = SandboxManager.getExecutionPayload(roleName, envVars, finalExecutor);
+    const taskWorkspace = prepareTaskWorkspace({
+      sandbox,
+      roleName,
+      issue: issueContext,
+      comments: issueComments,
+      taskId,
+      issueId,
+      runId,
+      parsedContext,
+      envVars,
+    });
     console.log(`[Matrix-Webhook] Role: ${roleName} | Executor: ${sandbox.executorName} | Command: ${sandbox.resolvedBinary} | Sandbox HOME: ${sandbox.cwd}`);
 
     // 3. Overlay sandbox env with webhook-specific settings
     const runEnv = {
       ...sandbox.env,
       PAPERCLIP_RUN_ID: runId,
+      PAPERCLIP_TASK_ID: taskId || '',
+      PAPERCLIP_ISSUE_ID: issueId || '',
+      PAPERCLIP_ISSUE_IDENTIFIER: issueContext.identifier || '',
+      PAPERCLIP_ISSUE_TITLE: issueContext.title || '',
+      PAPERCLIP_TASK_WORKSPACE: taskWorkspace,
     };
 
     // Inject proxy settings from global node config
@@ -389,6 +762,25 @@ export async function POST(req) {
     if (systemPrompt) {
       prompt += `\n[YOUR IDENTITY & INSTRUCTIONS]\n${systemPrompt}\n\n`;
     }
+    if (hasMeaningfulIssueContext(issueContext)) {
+      prompt += `\n[CURRENT ISSUE - AUTHORITATIVE]\n`;
+      if (issueContext.identifier) prompt += `Identifier: ${issueContext.identifier}\n`;
+      if (issueContext.id) prompt += `Issue ID: ${issueContext.id}\n`;
+      if (issueContext.title) prompt += `Title: ${issueContext.title}\n`;
+      if (issueContext.status) prompt += `Status: ${issueContext.status}\n`;
+      if (issueContext.priority) prompt += `Priority: ${issueContext.priority}\n`;
+      if (issueContext.description) prompt += `Description:\n${issueContext.description}\n`;
+      if (issueComments.length) {
+        prompt += `\n[RELEVANT ISSUE COMMENTS - AUTHORITATIVE]\n`;
+        for (const [index, comment] of issueComments.entries()) {
+          const label = comment.isTrigger ? `Trigger Comment ${index + 1}` : `Comment ${index + 1}`;
+          prompt += `\n${label}${comment.id ? ` (${comment.id})` : ''}${comment.createdAt ? ` at ${comment.createdAt}` : ''}:\n${comment.body}\n`;
+        }
+        prompt += `\nTreat trigger comments as the immediate instruction that caused this run.\n`;
+      }
+      prompt += `\nOnly work on this issue. Do not infer the task from unrelated files left in the workspace.\n`;
+      prompt += `A copy of this context is available at ${path.join(taskWorkspace, 'TASK_CONTEXT.md')}.\n\n`;
+    }
     if (taskContext && taskContext !== '""') {
       prompt += `[CURRENT TASK CONTEXT]\n${taskContext}\n`;
     }
@@ -398,8 +790,24 @@ export async function POST(req) {
     const baseCmd = getExecutorFamily(sandbox.executorName);
     const skipPermissions = envVars.RUNNER_SKIP_PERMISSIONS !== 'false';
     const modelArg = (finalModel && finalModel !== 'auto') ? finalModel : null;
-    const replyViaCallback = body.replyTransport === 'callback' || body.replyCallback === true;
-    const shouldAutoCloseIssue = body.autoCloseIssue === true || runEnv.PAPERCLIP_AUTO_CLOSE_ISSUE === 'true';
+    const replyEndpoint = resolveCloudReplyEndpoint({
+      body,
+      parsedContext,
+      identity,
+      runId,
+      runEnv,
+    });
+    const replyViaCallback = Boolean(replyEndpoint && runId && identity.apiKey);
+    if ((body.replyTransport === 'callback' || body.replyCallback === true) && !replyEndpoint) {
+      console.log(`[Matrix-Webhook] Callback transport requested for Run ${runId}, but no reply callback URL was provided. Relying on the streaming HTTP response.`);
+    }
+    const directIssueWriteback = body.directIssueWriteback === true || runEnv.PAPERCLIP_DIRECT_ISSUE_WRITEBACK === 'true';
+    const shouldAutoCloseIssue = directIssueWriteback && (body.autoCloseIssue === true || runEnv.PAPERCLIP_AUTO_CLOSE_ISSUE === 'true');
+    const cloudRequestedCallback = body.replyTransport === 'callback' || body.replyCallback === true;
+    const asyncAckMode = runEnv.PAPERCLIP_ASYNC_ACK !== 'false' && !replyViaCallback;
+    const shouldWriteIssueCommentOnFinish = directIssueWriteback
+      || (cloudRequestedCallback && !replyEndpoint)
+      || asyncAckMode;
     const { args, sendPromptToStdin } = buildWebhookInvocation({
       family: baseCmd,
       prompt,
@@ -483,8 +891,125 @@ export async function POST(req) {
         return true;
       },
     });
+
+    if (asyncAckMode) {
+      proc.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        fullResponse += text;
+        logToFile('stdout', text);
+      });
+
+      proc.stderr.on('data', (chunk) => {
+        const errText = chunk.toString();
+        fullResponse += errText;
+        logToFile('stderr', errText);
+      });
+
+      proc.on('close', async (code) => {
+        unregisterRunningProcess(dbRunId);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        let status = interrupted ? 'interrupted' : (code === 0 ? 'completed' : 'error');
+        if (status === 'completed' && !hasDeliverableResponse(fullResponse, status)) {
+          status = 'error';
+          fullResponse += '\n[Matrix-Webhook] Executor exited 0 but produced no final agent response.\n';
+          logToFile('stderr', '[Matrix-Webhook] Executor exited 0 but produced no final agent response.\n');
+        }
+        const finishedAt = Date.now();
+        try {
+          db.prepare(`UPDATE task_runs SET response = ?, repliedAt = ?, status = ? WHERE runId = ?`)
+            .run(fullResponse, finishedAt, status, dbRunId);
+        } catch(e) { console.error('[Matrix-Webhook] Failed to update task_runs:', e); }
+
+        if (replyViaCallback) {
+          await syncRunReplyToCloud({
+            identity: { ...identity, replyEndpoint },
+            agentId,
+            runId,
+            status,
+            response: fullResponse,
+            code,
+            finishedAt,
+            logToFile,
+          });
+        }
+        if (shouldWriteIssueCommentOnFinish) {
+          await ensureIssueComment({
+            identity,
+            issueId: issueId || taskId,
+            runId,
+            status,
+            response: fullResponse,
+            logToFile,
+          });
+        }
+        if (shouldAutoCloseIssue && !responseNeedsFollowUp(fullResponse)) {
+          await ensureIssueDone({
+            identity,
+            issueId: issueId || taskId,
+            runId,
+            status,
+            logToFile,
+          });
+        }
+
+        logToFile('stdout', `\n[Matrix-Webhook] Background run completed with exit code ${code}\n`);
+        logStream?.end();
+      });
+
+      proc.on('error', async (err) => {
+        unregisterRunningProcess(dbRunId);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        logToFile('stderr', err.message);
+        try {
+          db.prepare(`UPDATE task_runs SET response = ?, repliedAt = ?, status = 'error' WHERE runId = ?`)
+            .run(`${fullResponse}\n${err.message}`, Date.now(), dbRunId);
+        } catch {}
+        logStream?.end();
+      });
+
+      logToFile('stdout', `[Matrix-Webhook] Acknowledging Run ${runId} immediately; continuing in background.\n`);
+      return new Response(`${JSON.stringify({
+        type: 'result',
+        status: 'completed',
+        runId,
+        text: ASYNC_ACK_TEXT,
+      })}\n`, {
+        headers: {
+          'Content-Type': 'application/x-ndjson',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+        },
+      });
+    }
+
     const stream = new ReadableStream({
       start: (controller) => {
+        let streamClosed = false;
+        const enqueueJson = (payload) => {
+          if (streamClosed) return;
+          try {
+            controller.enqueue(encoder.encode(JSON.stringify(payload) + '\n'));
+          } catch {
+            streamClosed = true;
+          }
+        };
+        const closeStream = () => {
+          if (streamClosed) return;
+          streamClosed = true;
+          if (heartbeatHandle) clearInterval(heartbeatHandle);
+          try { controller.close(); } catch {}
+        };
+        enqueueJson({ type: 'status', status: 'running', runId });
+        const heartbeatMs = Math.max(5000, Number(runEnv.PAPERCLIP_STREAM_HEARTBEAT_MS || 15000));
+        const heartbeatHandle = setInterval(() => {
+          enqueueJson({
+            type: 'heartbeat',
+            status: 'running',
+            runId,
+            ts: new Date().toISOString(),
+          });
+        }, heartbeatMs);
+
         proc.stdout.on('data', (chunk) => {
           const text = chunk.toString();
           fullResponse += text;
@@ -493,11 +1018,17 @@ export async function POST(req) {
           if (baseCmd === 'hermes' || baseCmd === 'openclaw') {
             if (!rawTextForwarded && shouldForwardTextChunk(text)) {
               rawTextForwarded = true;
-              controller.enqueue(encoder.encode(JSON.stringify({ type: 'status', status: 'running' }) + '\n'));
+              enqueueJson({ type: 'status', status: 'running', runId });
             }
           } else {
             // Directly pass real-time JSONL payload native formats (tool calls, reasoning, etc) up to cloud
-            controller.enqueue(chunk); 
+            if (!streamClosed) {
+              try {
+                controller.enqueue(chunk);
+              } catch {
+                streamClosed = true;
+              }
+            }
           }
         });
 
@@ -509,23 +1040,29 @@ export async function POST(req) {
           const trimmed = errText.trim();
           if (trimmed) {
             const errPayload = { type: 'error', message: trimmed };
-            controller.enqueue(encoder.encode(JSON.stringify(errPayload) + '\n'));
+            enqueueJson(errPayload);
           }
         });
 
         proc.on('close', async (code, signal) => {
           unregisterRunningProcess(dbRunId);
           if (timeoutHandle) clearTimeout(timeoutHandle);
-          const status = interrupted ? 'interrupted' : (code === 0 ? 'completed' : 'error');
+          let status = interrupted ? 'interrupted' : (code === 0 ? 'completed' : 'error');
+          if (status === 'completed' && !hasDeliverableResponse(fullResponse, status)) {
+            status = 'error';
+            fullResponse += '\n[Matrix-Webhook] Executor exited 0 but produced no final agent response.\n';
+            logToFile('stderr', '[Matrix-Webhook] Executor exited 0 but produced no final agent response.\n');
+          }
           const finishedAt = Date.now();
           try {
              db.prepare(`UPDATE task_runs SET response = ?, repliedAt = ?, status = ? WHERE runId = ?`)
                .run(fullResponse, finishedAt, status, dbRunId);
           } catch(e) { console.error('[Matrix-Webhook] Failed to update task_runs:', e); }
 
+          let callbackSynced = false;
           if (replyViaCallback) {
-            await syncRunReplyToCloud({
-              identity,
+            callbackSynced = await syncRunReplyToCloud({
+              identity: { ...identity, replyEndpoint },
               agentId,
               runId,
               status,
@@ -535,14 +1072,16 @@ export async function POST(req) {
               logToFile,
             });
           }
-          await ensureIssueComment({
-            identity,
-            issueId: issueId || taskId,
-            runId,
-            status,
-            response: fullResponse,
-            logToFile,
-          });
+          if (shouldWriteIssueCommentOnFinish) {
+            await ensureIssueComment({
+              identity,
+              issueId: issueId || taskId,
+              runId,
+              status,
+              response: fullResponse,
+              logToFile,
+            });
+          }
           if (shouldAutoCloseIssue && !responseNeedsFollowUp(fullResponse)) {
             await ensureIssueDone({
               identity,
@@ -554,12 +1093,17 @@ export async function POST(req) {
           }
 
           logToFile('stdout', `\n[Matrix-Webhook] Completed with exit code ${code}\n`);
-          if ((baseCmd === 'hermes' || baseCmd === 'openclaw') && status === 'completed') {
-            const cleaned = cleanAgentResponse(fullResponse);
-            if (cleaned) {
-              controller.enqueue(encoder.encode(JSON.stringify({ type: 'text', text: cleaned }) + '\n'));
-            }
+          const cleaned = buildRemoteResponse(fullResponse, status);
+          if ((baseCmd === 'hermes' || baseCmd === 'openclaw') && status === 'completed' && cleaned) {
+            enqueueJson({ type: 'text', text: cleaned });
           }
+          enqueueJson({
+            type: 'result',
+            status,
+            exitCode: code,
+            runId,
+            text: cleaned || undefined,
+          });
           if (code !== 0 || timedOut || interrupted) {
             const finalPayload = {
               type: 'error',
@@ -567,9 +1111,9 @@ export async function POST(req) {
                 ? interruptedReason
                 : (timedOut ? `Process timed out after ${timeoutMs}ms` : `Process exited with code ${code}`)
             };
-            controller.enqueue(encoder.encode(JSON.stringify(finalPayload) + '\n'));
+            enqueueJson(finalPayload);
           }
-          controller.close();
+          closeStream();
           logStream?.end();
         });
 
@@ -582,8 +1126,8 @@ export async function POST(req) {
               .run(`${fullResponse}\n${err.message}`, Date.now(), dbRunId);
           } catch {}
           const errPayload = { type: 'error', message: `Matrix OS Executor failure: ${err.message}` };
-          controller.enqueue(encoder.encode(JSON.stringify(errPayload) + '\n'));
-          controller.close();
+          enqueueJson(errPayload);
+          closeStream();
           logStream?.end();
         });
       }

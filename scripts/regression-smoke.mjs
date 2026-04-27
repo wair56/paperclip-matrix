@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import getDb from "../src/lib/db.js";
@@ -26,6 +27,15 @@ function assert(condition, message) {
 async function readJson(response) {
   const text = await response.text();
   return text ? JSON.parse(text) : null;
+}
+
+async function readNdjson(response) {
+  const text = await response.text();
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 async function testRunsHistory(db, prefix) {
@@ -147,7 +157,7 @@ async function testWebhookDedup(db, prefix) {
     null,
     5000,
     "smoke-key",
-    JSON.stringify({ RUNNER_SKIP_PERMISSIONS: "true" }),
+    JSON.stringify({ RUNNER_SKIP_PERMISSIONS: "true", PAPERCLIP_ASYNC_ACK: "false" }),
   );
 
   const fetchCalls = [];
@@ -155,6 +165,12 @@ async function testWebhookDedup(db, prefix) {
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
     const method = (options.method || "GET").toUpperCase();
+    const headerEntries = options.headers instanceof Headers
+      ? Array.from(options.headers.entries())
+      : Object.entries(options.headers || {});
+    const headers = Object.fromEntries(
+      headerEntries.map(([key, value]) => [String(key).toLowerCase(), String(value)]),
+    );
     let body = null;
     if (typeof options.body === "string" && options.body.length > 0) {
       try {
@@ -163,10 +179,33 @@ async function testWebhookDedup(db, prefix) {
         body = options.body;
       }
     }
-    fetchCalls.push({ url: href, method, body });
+    fetchCalls.push({ url: href, method, headers, body });
 
+    if (href.endsWith(`/api/issues/${issueId}`) && method === "GET") {
+      return new Response(JSON.stringify({
+        id: issueId,
+        identifier: `${prefix.toUpperCase()}-1`,
+        title: "Smoke issue title",
+        description: "Smoke issue description",
+        status: "todo",
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (href.endsWith(`/api/issues/${issueId}/comments`) && method === "GET") {
-      return new Response(JSON.stringify([]), {
+      return new Response(JSON.stringify([
+        {
+          id: "older-comment",
+          body: "Older background comment",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          id: sourceEventId,
+          body: "Please use this trigger comment as the immediate instruction",
+          createdAt: "2026-01-02T00:00:00.000Z",
+        },
+      ]), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -214,11 +253,23 @@ async function testWebhookDedup(db, prefix) {
         }),
       }),
     );
-    await firstResponse.text();
+    const firstEvents = await readNdjson(firstResponse);
 
-    const firstRun = db.prepare(`SELECT status, response, sourceEventId FROM task_runs WHERE runId = ?`).get(runId);
+    const firstRun = db.prepare(`SELECT status, prompt, response, sourceEventId FROM task_runs WHERE runId = ?`).get(runId);
     assert(firstRun?.status === "completed", `webhook run should complete, got ${firstRun?.status}`);
     assert(firstRun?.sourceEventId === sourceEventId, "webhook run should persist sourceEventId");
+    assert(firstRun?.prompt?.includes("Smoke issue title"), "webhook prompt should include fetched issue title");
+    assert(firstRun?.prompt?.includes("Please use this trigger comment"), "webhook prompt should include trigger comment text");
+    assert(firstRun?.prompt?.includes("Treat trigger comments as the immediate instruction"), "webhook prompt should prioritize trigger comments");
+    assert(firstRun?.prompt?.includes("Only work on this issue"), "webhook prompt should warn against stale workspace context");
+    assert(
+      firstEvents.some((event) => event?.type === "result" && event?.status === "completed" && event?.runId === runId),
+      "webhook stream should emit a completed result event",
+    );
+    assert(
+      firstEvents.some((event) => event?.type === "status" && event?.status === "running" && event?.runId === runId),
+      "webhook stream should immediately emit a running status event",
+    );
 
     const firstReplyCalls = fetchCalls.filter((call) => call.url.endsWith(`/api/runs/${runId}/reply`));
     const firstCommentGets = fetchCalls.filter(
@@ -231,10 +282,14 @@ async function testWebhookDedup(db, prefix) {
       (call) => call.url.endsWith(`/api/issues/${issueId}`) && call.method === "PATCH",
     );
 
-    assert(firstReplyCalls.length === 1, `expected 1 callback reply, got ${firstReplyCalls.length}`);
-    assert(firstCommentGets.length === 1, `expected 1 issue comment list call, got ${firstCommentGets.length}`);
-    assert(firstCommentPosts.length === 1, `expected 1 issue comment post, got ${firstCommentPosts.length}`);
-    assert(firstIssuePatches.length === 0, "empty response should not auto-close issue");
+    assert(firstReplyCalls.length === 0, `default hosted-cloud webhook should rely on streaming instead of legacy callback reply, got ${firstReplyCalls.length}`);
+    assert(firstCommentGets.length === 2, `hosted-cloud webhook should fetch issue comments for context and writeback idempotency, got ${firstCommentGets.length}`);
+    assert(firstCommentPosts.length === 1, `hosted-cloud callback without a concrete reply URL should post one issue comment, got ${firstCommentPosts.length}`);
+    assert(
+      String(firstCommentPosts[0]?.body?.body || "").includes(`paperclip-run:${runId}`),
+      "hosted-cloud issue comment fallback should include a run marker for idempotency",
+    );
+    assert(firstIssuePatches.length === 0, "default webhook should not auto-close issue directly");
 
     const duplicateRunResponse = await postWebhook(
       new Request("http://localhost/api/webhook/paperclip", {
@@ -244,7 +299,6 @@ async function testWebhookDedup(db, prefix) {
           runId,
           agentId,
           companyId,
-          replyTransport: "callback",
           context: {
             issueId,
             taskId: issueId,
@@ -268,7 +322,6 @@ async function testWebhookDedup(db, prefix) {
           runId: `${runId}-2`,
           agentId,
           companyId,
-          replyTransport: "callback",
           context: {
             issueId,
             taskId: issueId,
@@ -288,8 +341,322 @@ async function testWebhookDedup(db, prefix) {
     const totalCommentPosts = fetchCalls.filter(
       (call) => call.url.endsWith(`/api/issues/${issueId}/comments`) && call.method === "POST",
     );
-    assert(totalReplyCalls.length === 1, "duplicate webhook deliveries must not send repeated callback replies");
+    assert(totalReplyCalls.length === 0, "duplicate webhook deliveries must not send legacy callback replies by default");
     assert(totalCommentPosts.length === 1, "duplicate webhook deliveries must not post repeated issue comments");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const workspacePath = path.join(WORKSPACES_DIR, agentId);
+  if (existsSync(workspacePath)) {
+    rmSync(workspacePath, { recursive: true, force: true });
+  }
+}
+
+
+async function testWebhookIgnoresFetchedPaperclipWakeComment(db, prefix) {
+  const role = `${prefix}-role-webhook-ignore`;
+  const agentId = `${prefix}-agent-webhook-ignore`;
+  const companyId = `${prefix}-company-webhook-ignore`;
+  const issueId = `${prefix}-issue-webhook-ignore`;
+  const runId = `${prefix}-webhook-ignore-run`;
+  const sourceEventId = `${prefix}-webhook-ignore-comment`;
+  const apiUrl = "https://smoke.paperclip.local";
+
+  db.prepare(`
+    INSERT OR REPLACE INTO identities
+      (role, name, agentId, apiUrl, companyId, executor, model, timeoutMs, apiKey, envJson, status, isActive)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0)
+  `).run(
+    role,
+    `${role}-name`,
+    agentId,
+    apiUrl,
+    companyId,
+    "true-local",
+    null,
+    5000,
+    "smoke-key",
+    JSON.stringify({ RUNNER_SKIP_PERMISSIONS: "true" }),
+  );
+
+  const fetchCalls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    const method = (options.method || "GET").toUpperCase();
+    fetchCalls.push({ url: href, method });
+
+    if (href.endsWith(`/api/issues/${issueId}`) && method === "GET") {
+      return new Response(JSON.stringify({ id: issueId, title: "Ignored trigger issue" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (href.endsWith(`/api/issues/${issueId}/comments`) && method === "GET") {
+      return new Response(JSON.stringify([
+        {
+          id: sourceEventId,
+          body: `Done already. <!-- paperclip-run:${runId} -->`,
+          createdAt: "2026-01-03T00:00:00.000Z",
+        },
+      ]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`Unexpected fetch in webhook ignore smoke test: ${method} ${href}`);
+  };
+
+  try {
+    const response = await postWebhook(
+      new Request("http://localhost/api/webhook/paperclip", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runId,
+          agentId,
+          companyId,
+          context: {
+            issueId,
+            taskId: issueId,
+            commentId: sourceEventId,
+            wakeCommentId: sourceEventId,
+            paperclipWake: {
+              latestCommentId: sourceEventId,
+            },
+          },
+        }),
+      }),
+    );
+    const events = await readNdjson(response);
+    const run = db.prepare(`SELECT status, response FROM task_runs WHERE runId = ?`).get(runId);
+
+    assert(response.status === 204, `ignored wake webhook should return no-content, got ${response.status}`);
+    assert(run?.status === "completed", `ignored wake run should complete immediately, got ${run?.status}`);
+    assert(run?.response === "Ignored Paperclip-generated completion comment.", "ignored wake run should persist the ignore reason");
+    assert(events.length === 0, "ignored wake webhook should not emit a result body that cloud may mirror as a comment");
+    const commentPosts = fetchCalls.filter((call) => call.url.endsWith(`/api/issues/${issueId}/comments`) && call.method === "POST");
+    assert(commentPosts.length === 0, "ignored wake should not write any new issue comments");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const workspacePath = path.join(WORKSPACES_DIR, agentId);
+  if (existsSync(workspacePath)) {
+    rmSync(workspacePath, { recursive: true, force: true });
+  }
+}
+
+async function testWebhookAutoClose(db, prefix) {
+  const role = `${prefix}-role-webhook-autoclose`;
+  const agentId = `${prefix}-agent-webhook-autoclose`;
+  const companyId = `${prefix}-company-webhook-autoclose`;
+  const issueId = `${prefix}-issue-webhook-autoclose`;
+  const runId = `${prefix}-webhook-autoclose-run`;
+  const apiUrl = "https://smoke.paperclip.local";
+
+  db.prepare(`
+    INSERT OR REPLACE INTO identities
+      (role, name, agentId, apiUrl, companyId, executor, model, timeoutMs, apiKey, envJson, status, isActive)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0)
+  `).run(
+    role,
+    `${role}-name`,
+    agentId,
+    apiUrl,
+    companyId,
+    "openclaw-gateway",
+    null,
+    5000,
+    "smoke-key",
+    JSON.stringify({ RUNNER_SKIP_PERMISSIONS: "true" }),
+  );
+
+  const fakeBinDir = mkdtempSync(path.join(os.tmpdir(), `${prefix}-fake-bin-`));
+  const fakeBinary = path.join(fakeBinDir, "openclaw");
+  writeFileSync(fakeBinary, "#!/bin/sh\nprintf 'done from smoke\\n'\n");
+  chmodSync(fakeBinary, 0o755);
+
+  const originalPath = process.env.PATH || "";
+  process.env.PATH = `${fakeBinDir}${path.delimiter}${originalPath}`;
+
+  const fetchCalls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    const method = (options.method || "GET").toUpperCase();
+    const headerEntries = options.headers instanceof Headers
+      ? Array.from(options.headers.entries())
+      : Object.entries(options.headers || {});
+    const headers = Object.fromEntries(
+      headerEntries.map(([key, value]) => [String(key).toLowerCase(), String(value)]),
+    );
+    const body = typeof options.body === "string" && options.body.length > 0
+      ? JSON.parse(options.body)
+      : null;
+    fetchCalls.push({ url: href, method, headers, body });
+
+    if (href.endsWith(`/api/issues/${issueId}/comments`) && method === "GET") {
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (href.endsWith(`/api/issues/${issueId}/comments`) && method === "POST") {
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (href.endsWith(`/api/runs/${runId}/reply`) && method === "POST") {
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (href.endsWith(`/api/issues/${issueId}`) && method === "PATCH") {
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`Unexpected fetch in webhook auto-close smoke test: ${method} ${href}`);
+  };
+
+  try {
+    const response = await postWebhook(
+      new Request("http://localhost/api/webhook/paperclip", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runId,
+          agentId,
+          companyId,
+          replyCallbackUrl: `${apiUrl}/api/runs/${runId}/reply`,
+          directIssueWriteback: true,
+          autoCloseIssue: true,
+          context: {
+            issueId,
+            taskId: issueId,
+          },
+        }),
+      }),
+    );
+    const events = await readNdjson(response);
+
+    const replyCalls = fetchCalls.filter((call) => call.url.endsWith(`/api/runs/${runId}/reply`));
+    const issuePatches = fetchCalls.filter(
+      (call) => call.url.endsWith(`/api/issues/${issueId}`) && call.method === "PATCH",
+    );
+
+    assert(
+      events.some((event) => event?.type === "result" && event?.status === "completed" && event?.runId === runId),
+      "auto-close webhook stream should emit a completed result event",
+    );
+    assert(replyCalls.length === 1, "auto-close webhook should sync a single callback reply");
+    assert(replyCalls[0]?.body?.response === "done from smoke", "plain CLI output should be preserved for callback sync");
+    assert(issuePatches.length === 1, "non-empty webhook response should auto-close the issue once");
+    assert(
+      issuePatches[0]?.headers?.["x-paperclip-run-id"] === runId,
+      "issue auto-close patch should carry x-paperclip-run-id",
+    );
+    assert(issuePatches[0]?.body?.status === "done", "issue auto-close patch should mark the issue done");
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.PATH = originalPath;
+    rmSync(fakeBinDir, { recursive: true, force: true });
+  }
+
+  const workspacePath = path.join(WORKSPACES_DIR, agentId);
+  if (existsSync(workspacePath)) {
+    rmSync(workspacePath, { recursive: true, force: true });
+  }
+}
+
+async function testWebhookCallbackFallback(db, prefix) {
+  const role = `${prefix}-role-webhook-fallback`;
+  const agentId = `${prefix}-agent-webhook-fallback`;
+  const companyId = `${prefix}-company-webhook-fallback`;
+  const issueId = `${prefix}-issue-webhook-fallback`;
+  const runId = `${prefix}-webhook-fallback-run`;
+  const apiUrl = "https://smoke.paperclip.local";
+
+  db.prepare(`
+    INSERT OR REPLACE INTO identities
+      (role, name, agentId, apiUrl, companyId, executor, model, timeoutMs, apiKey, envJson, status, isActive)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0)
+  `).run(
+    role,
+    `${role}-name`,
+    agentId,
+    apiUrl,
+    companyId,
+    "true-local",
+    null,
+    5000,
+    "smoke-key",
+    JSON.stringify({ RUNNER_SKIP_PERMISSIONS: "true", PAPERCLIP_LEGACY_RUN_REPLY: "true" }),
+  );
+
+  const fetchCalls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    const method = (options.method || "GET").toUpperCase();
+    const body = typeof options.body === "string" && options.body.length > 0
+      ? JSON.parse(options.body)
+      : null;
+    fetchCalls.push({ url: href, method, body });
+
+    if (href.endsWith(`/api/issues/${issueId}`) && method === "GET") {
+      return new Response(JSON.stringify({ id: issueId, title: "Fallback issue title" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (href.endsWith(`/api/runs/${runId}/reply`) && method === "POST") {
+      return new Response(JSON.stringify({ error: "API route not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (href.endsWith(`/api/issues/${issueId}/comments`) && method === "GET") {
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (href.endsWith(`/api/issues/${issueId}/comments`) && method === "POST") {
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`Unexpected fetch in webhook callback fallback smoke test: ${method} ${href}`);
+  };
+
+  try {
+    const response = await postWebhook(
+      new Request("http://localhost/api/webhook/paperclip", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runId,
+          agentId,
+          companyId,
+          context: { issueId, taskId: issueId },
+        }),
+      }),
+    );
+    await readNdjson(response);
+
+    const replyCalls = fetchCalls.filter((call) => call.url.endsWith(`/api/runs/${runId}/reply`));
+    const commentPosts = fetchCalls.filter(
+      (call) => call.url.endsWith(`/api/issues/${issueId}/comments`) && call.method === "POST",
+    );
+    assert(replyCalls.length === 1, "fallback webhook should attempt callback reply once");
+    assert(commentPosts.length === 0, "callback failure should not create issue comments by default because comments can retrigger automations");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -743,6 +1110,9 @@ async function main() {
     await testRunsHistory(db, prefix);
     await testKillApi(db, prefix);
     await testWebhookDedup(db, prefix);
+    await testWebhookIgnoresFetchedPaperclipWakeComment(db, prefix);
+    await testWebhookAutoClose(db, prefix);
+    await testWebhookCallbackFallback(db, prefix);
     await testIdentityProvisionAndPatch(db, prefix);
     await testIdentitySync(db, prefix);
     await testWorkerSync(db, prefix);

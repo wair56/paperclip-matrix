@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, copyFileSync } from 'fs';
 import path from 'path';
 import os from 'os';
-import { WORKSPACES_DIR } from './paths';
+import { DATA_DIR, WORKSPACES_DIR } from './paths';
 import getDb from './db';
 import { getExecutorBinaryName } from './executors';
 import { getPrimaryWorkspacePathForIdentity } from './workspaces';
@@ -79,6 +79,12 @@ export class SandboxManager {
 
     // Enforce the strict working directory bound
     isolatedEnv.WORK_DIR = workspacePath;
+    if (workspacePath === DATA_DIR || workspacePath.startsWith(`${DATA_DIR}${path.sep}`)) {
+      // Local agent scratch workspaces live under the Matrix app repo's .data
+      // folder. Prevent Git-aware CLIs from walking up to the Matrix source
+      // repo and mistaking app code for task context.
+      isolatedEnv.GIT_CEILING_DIRECTORIES = DATA_DIR;
+    }
 
     // 2. Resolve the executor name
     const executorName = executorOverride || isolatedEnv.RUNNER_EXECUTOR || 'claude-local';
